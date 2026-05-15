@@ -1,5 +1,6 @@
 data/policies.db
 data/chain.json
+sources/dataset/
 __pycache__/
 *.pyc
 .env
