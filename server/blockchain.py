@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -12,13 +12,41 @@ from typing import Any
 @dataclass(frozen=True)
 class OnChainData:
     rawFile: str
-    policyId: str
     policyVersion: str | None = None
-    hashCode: str | None = None
+    publisherEntity: str = ""
+    policyUrl: str = ""
+    serviceName: str = ""
+    effectiveDate: str = ""
+    dataTypeTags: str = ""
+    dataSourceTypes: str = ""
+    collectionContext: str = ""
+    processingPurpose: str = ""
+    permittedUsage: str = ""
+    thirdPartySources: str = ""
+    downstreamStakeholders: str = ""
+    thirdPartyPurpose: str = ""
+    sharingCondition: str = ""
+    consentRequired: str = ""
+    optOutAvailable: str = ""
+    deletionAvailable: str = ""
+    requestChannel: str = ""
+    retentionPolicy: str = ""
+    encryptionApplied: str = ""
+    anonymisation: str = ""
+    regulatoryFramework: str = ""
+    crossBorderTransfer: str = ""
+    childDataInvolved: str = ""
+    changeSummary: str = ""
+    contactChannel: str = ""
+    riskFlags: str = ""
+    previousRecordKey: str = ""
+    previousPolicyVersion: str = ""
+    hasPreviousReference: bool = False
 
 
 @dataclass(frozen=True)
 class ChainRecord:
+    recordKey: str
     blockNumber: int
     txHash: str
     timestamp: int
@@ -39,13 +67,25 @@ class TrustedPolicyRegistry:
     def register_trusted_policy_record(self, data: OnChainData) -> ChainRecord:
         chain = self._load()
         previous_hash = chain[-1]["blockHash"] if chain else "GENESIS"
+        previous_policy_record = self._latest_policy_record(chain, data.publisherEntity, data.serviceName)
+        previous_record_key = previous_policy_record["recordKey"] if previous_policy_record else ""
+        data = replace(
+            data,
+            previousRecordKey=previous_record_key,
+            previousPolicyVersion=(
+                previous_policy_record["data"].get("policyVersion", "") if previous_policy_record else ""
+            ),
+            hasPreviousReference=bool(previous_policy_record),
+        )
+        record_key = self._record_key(data.publisherEntity, data.serviceName, data.policyVersion)
         block_number = len(chain) + 1
         timestamp = int(time.time())
         tx_hash = "0x" + hashlib.sha256(
-            f"{uuid.uuid4()}:{data.policyId}:{data.policyVersion}:{timestamp}".encode("utf-8")
+            f"{uuid.uuid4()}:{data.publisherEntity}:{data.serviceName}:{data.policyVersion}:{timestamp}".encode("utf-8")
         ).hexdigest()
         block_hash = self._block_hash(block_number, tx_hash, timestamp, data, previous_hash)
         record = ChainRecord(
+            recordKey=record_key,
             blockNumber=block_number,
             txHash=tx_hash,
             timestamp=timestamp,
@@ -57,11 +97,19 @@ class TrustedPolicyRegistry:
         self.ledger_path.write_text(json.dumps(chain, indent=2), encoding="utf-8")
         return record
 
-    def read_on_chain_record(self, policy_id: str, policy_version: str | None = None) -> ChainRecord | None:
+    def read_on_chain_record(
+        self,
+        publisher_entity: str,
+        service_name: str,
+        policy_version: str | None = None,
+    ) -> ChainRecord | None:
         matches = []
         for item in self._load():
             data = item["data"]
-            same_policy = data["policyId"] == policy_id
+            same_policy = (
+                data.get("publisherEntity") == publisher_entity
+                and data.get("serviceName") == service_name
+            )
             same_version = policy_version is None or data.get("policyVersion") == policy_version
             if same_policy and same_version:
                 matches.append(item)
@@ -74,6 +122,22 @@ class TrustedPolicyRegistry:
 
     def _load(self) -> list[dict[str, Any]]:
         return json.loads(self.ledger_path.read_text(encoding="utf-8"))
+
+    def _latest_policy_record(
+        self,
+        chain: list[dict[str, Any]],
+        publisher_entity: str,
+        service_name: str,
+    ) -> dict[str, Any] | None:
+        for item in reversed(chain):
+            data = item["data"]
+            if data.get("publisherEntity") == publisher_entity and data.get("serviceName") == service_name:
+                return item
+        return None
+
+    def _record_key(self, publisher_entity: str, service_name: str, policy_version: str | None) -> str:
+        payload = json.dumps([publisher_entity, service_name, policy_version or ""], ensure_ascii=False)
+        return "0x" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _block_hash(
         self,
@@ -97,6 +161,7 @@ class TrustedPolicyRegistry:
 
     def _to_json(self, record: ChainRecord) -> dict[str, Any]:
         return {
+            "recordKey": record.recordKey,
             "blockNumber": record.blockNumber,
             "txHash": record.txHash,
             "timestamp": record.timestamp,
@@ -106,12 +171,15 @@ class TrustedPolicyRegistry:
         }
 
     def _from_json(self, item: dict[str, Any]) -> ChainRecord:
+        data = dict(item["data"])
+        data.pop("policyId", None)
+        data.pop("hashCode", None)
         return ChainRecord(
+            recordKey=item.get("recordKey", ""),
             blockNumber=item["blockNumber"],
             txHash=item["txHash"],
             timestamp=item["timestamp"],
-            data=OnChainData(**item["data"]),
+            data=OnChainData(**data),
             previousBlockHash=item["previousBlockHash"],
             blockHash=item["blockHash"],
         )
-

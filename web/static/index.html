@@ -26,115 +26,160 @@
         </div>
       </header>
 
+      <nav class="view-nav" aria-label="Workflow">
+        <button class="view-tab active" type="button" data-view="create">Create</button>
+        <button class="view-tab" type="button" data-view="query">Query</button>
+        <button class="view-tab" type="button" data-view="records">Records</button>
+        <button class="view-tab" type="button" data-view="verify">Verify</button>
+        <button class="view-tab" type="button" data-view="update">Update</button>
+      </nav>
+
       <section class="workspace">
-        <form class="panel editor" id="policyForm">
-          <div class="panel-heading">
-            <h2>Create Policy</h2>
-            <button class="icon-button" type="button" id="sampleButton" title="Load sample policy">↺</button>
+        <section class="view-page active" data-page="create">
+          <div class="page-grid create-grid">
+            <form class="panel editor" id="policyForm">
+              <div class="panel-heading">
+                <h2>Create Policy</h2>
+                <button class="icon-button" type="button" id="sampleButton" title="Load sample policy">↺</button>
+              </div>
+
+              <label>
+                Application Name
+                <input name="applicationName" required placeholder="Your application name">
+              </label>
+
+              <label>
+                Policy URL
+                <input name="policyUrl" type="url" placeholder="https://example.com/privacy">
+              </label>
+
+              <label>
+                Effective Date
+                <input name="effectiveDate" type="date">
+              </label>
+
+              <input name="developer" type="hidden">
+
+              <label>
+                Upload Policy File
+                <input name="rawFile" type="file" accept=".txt,.md,.html,.json,.policy,text/*" required>
+              </label>
+
+              <button class="primary" type="submit">Process and Register</button>
+            </form>
+
+            <section class="panel results">
+              <div class="panel-heading">
+                <h2>Processing Result</h2>
+                <span class="metric" id="readinessMetric">0%</span>
+              </div>
+              <div class="summary-grid">
+                <div>
+                  <span>Hash</span>
+                  <strong id="hashValue">Waiting for policy</strong>
+                </div>
+                <div>
+                  <span>Transaction</span>
+                  <strong id="txValue">No transaction yet</strong>
+                </div>
+                <div>
+                  <span>SQL Storage</span>
+                  <strong id="storageValue">Idle</strong>
+                </div>
+                <div>
+                  <span>Chain Block</span>
+                  <strong id="blockValue">Idle</strong>
+                </div>
+              </div>
+              <div class="report-box" id="reportBox">Submit a policy to extract metadata and generate a report.</div>
+            </section>
           </div>
-
-          <label>
-            Application Name
-            <input name="applicationName" required placeholder="Your application name">
-          </label>
-
-          <input name="developer" type="hidden">
-
-          <label>
-            Upload Policy File
-            <input name="rawFile" type="file" accept=".txt,.md,.html,.json,.policy,text/*" required>
-          </label>
-
-          <button class="primary" type="submit">Process and Register</button>
-        </form>
-
-        <section class="panel results">
-          <div class="panel-heading">
-            <h2>Processing Result</h2>
-            <span class="metric" id="readinessMetric">0%</span>
-          </div>
-          <div class="summary-grid">
-            <div>
-              <span>Hash</span>
-              <strong id="hashValue">Waiting for policy</strong>
-            </div>
-            <div>
-              <span>Transaction</span>
-              <strong id="txValue">No transaction yet</strong>
-            </div>
-            <div>
-              <span>SQL Storage</span>
-              <strong id="storageValue">Idle</strong>
-            </div>
-            <div>
-              <span>Chain Block</span>
-              <strong id="blockValue">Idle</strong>
-            </div>
-          </div>
-          <div class="report-box" id="reportBox">Submit a policy to extract metadata and generate a report.</div>
         </section>
 
-        <form class="panel query" id="queryForm">
-          <div class="panel-heading">
-            <h2>Query</h2>
-            <button class="icon-button" type="button" id="refreshButton" title="Refresh records">⟳</button>
-          </div>
-          <label>
-            Application Name
-            <input name="applicationName" required placeholder="Search by application name">
-          </label>
-          <button class="secondary" type="submit">Query Policies</button>
-          <div class="verification" id="queryBox">Search results will appear in the records list.</div>
-          <div class="policy-fulltext" id="queryFullText">No policy selected.</div>
-        </form>
+        <section class="view-page" data-page="query" hidden>
+          <form class="panel query" id="queryForm">
+            <div class="panel-heading">
+              <h2>Query</h2>
+            </div>
+            <label>
+              Application Name
+              <input name="applicationName" required placeholder="Search by application name">
+            </label>
+            <button class="secondary" type="submit">Query Policies</button>
+            <div class="verification" id="queryBox">Search for an application to view the latest matching policy metadata.</div>
+            <div class="policy-fulltext" id="queryFullText">No policy selected.</div>
+          </form>
+        </section>
 
-        <form class="panel verifier" id="verifyForm">
-          <div class="panel-heading">
-            <h2>Verification</h2>
-          </div>
-          <label>
-            Application Name
-            <input name="applicationName" required placeholder="Application name to verify">
-          </label>
-          <label>
-            Upload File to Verify
-            <input name="rawFile" type="file" accept=".txt,.md,.html,.json,.policy,text/*">
-          </label>
-          <label>
-            Or Paste Policy Text
-            <textarea name="rawText" placeholder="Paste policy text to verify"></textarea>
-          </label>
-          <button class="secondary" type="submit">Verify Policy</button>
-          <div class="verification" id="verificationBox">No verification request yet.</div>
-        </form>
+        <section class="view-page" data-page="records" hidden>
+          <div class="records-layout">
+            <section class="panel records">
+              <div class="panel-heading">
+                <h2>Registered Records</h2>
+                <div class="heading-actions">
+                  <span id="recordCount">0</span>
+                  <button class="icon-button" type="button" id="refreshButton" title="Refresh records">⟳</button>
+                </div>
+              </div>
+              <div class="record-list" id="recordList"></div>
+            </section>
 
-        <form class="panel updater" id="updateForm">
-          <div class="panel-heading">
-            <h2>Update Policy</h2>
-            <span id="manageableCount">0</span>
+            <section class="panel record-detail-panel">
+              <div class="panel-heading">
+                <h2>Record Detail</h2>
+              </div>
+              <div class="policy-fulltext" id="recordsDetail">Select a record to inspect its metadata.</div>
+            </section>
           </div>
-          <input name="developer" type="hidden">
-          <label>
-            Managed Application Policy
-            <select name="policyId" required id="managedPolicySelect">
-              <option value="">Select a policy</option>
-            </select>
-          </label>
-          <div class="selected-policy" id="selectedPolicyBox">No policy selected.</div>
-          <label>
-            Upload New Policy File
-            <input name="rawFile" type="file" accept=".txt,.md,.html,.json,.policy,text/*" required>
-          </label>
-          <button class="primary" type="submit">Update Selected Policy</button>
-          <div class="verification" id="updateBox">Choose a policy to update.</div>
-        </form>
+        </section>
 
-        <section class="panel records">
-          <div class="panel-heading">
-            <h2>Registered Records</h2>
-            <span id="recordCount">0</span>
-          </div>
-          <div class="record-list" id="recordList"></div>
+        <section class="view-page" data-page="verify" hidden>
+          <form class="panel verifier" id="verifyForm">
+            <div class="panel-heading">
+              <h2>Verification</h2>
+            </div>
+            <label>
+              Application Name
+              <input name="applicationName" required placeholder="Application name to verify">
+            </label>
+            <label>
+              Upload File to Verify
+              <input name="rawFile" type="file" accept=".txt,.md,.html,.json,.policy,text/*">
+            </label>
+            <label>
+              Or Paste Policy Text
+              <textarea name="rawText" placeholder="Paste policy text to verify"></textarea>
+            </label>
+            <button class="secondary" type="submit">Verify Policy</button>
+            <div class="verification" id="verificationBox">No verification request yet.</div>
+          </form>
+        </section>
+
+        <section class="view-page" data-page="update" hidden>
+          <form class="panel updater" id="updateForm">
+            <div class="panel-heading">
+              <h2>Update Policy</h2>
+              <span id="manageableCount">0</span>
+            </div>
+            <input name="developer" type="hidden">
+            <label>
+              Managed Application Policy
+              <select name="policyId" required id="managedPolicySelect">
+                <option value="">Select a policy</option>
+              </select>
+            </label>
+            <div class="selected-policy" id="selectedPolicyBox">No policy selected.</div>
+            <label>
+              Upload New Policy File
+              <input name="rawFile" type="file" accept=".txt,.md,.html,.json,.policy,text/*" required>
+            </label>
+            <label>
+              Change Summary
+              <textarea name="changeSummary" placeholder="Briefly summarize this policy update"></textarea>
+            </label>
+            <button class="primary" type="submit">Update Selected Policy</button>
+            <div class="verification" id="updateBox">Choose a policy to update.</div>
+          </form>
         </section>
       </section>
     </main>

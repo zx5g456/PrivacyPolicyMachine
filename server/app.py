@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from blockchain import OnChainData, TrustedPolicyRegistry
-from processor import extract_metadata, generate_report, hash_policy
+from processor import extract_metadata, generate_report, hash_policy, normalize_policy_text
 from storage import PolicyStore
 
 
@@ -49,7 +49,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 if not policy:
                     self._json({"error": "Policy not found"}, HTTPStatus.NOT_FOUND)
                     return
-                chain_record = registry.read_on_chain_record(policy_id, policy["policy_version"])
+                chain_record = registry.read_on_chain_record(
+                    policy["developer_name"],
+                    policy["policy_name"],
+                    policy["policy_version"],
+                )
                 self._json({"policy": policy, "onChain": self._chain_to_dict(chain_record)})
             elif parsed.path == "/api/chain":
                 self._json({"records": [self._chain_to_dict(item) for item in registry.list_records()]})
@@ -96,6 +100,9 @@ class AppHandler(BaseHTTPRequestHandler):
             developer_name=developer_name,
             raw_file=raw_file,
             hash_code=hash_code,
+            policy_url=self._optional_payload(payload, "policyUrl"),
+            effective_date=self._optional_payload(payload, "effectiveDate"),
+            change_summary="",
         )
         self._json(
             {
@@ -132,6 +139,9 @@ class AppHandler(BaseHTTPRequestHandler):
             developer_name=developer_name,
             raw_file=raw_file,
             hash_code=hash_code,
+            policy_url=self._optional_payload(payload, "policyUrl"),
+            effective_date=self._optional_payload(payload, "effectiveDate"),
+            change_summary=self._optional_payload(payload, "changeSummary"),
         )
         self._json(
             {
@@ -152,18 +162,22 @@ class AppHandler(BaseHTTPRequestHandler):
         developer_name: str,
         raw_file: str,
         hash_code: str,
+        policy_url: str,
+        effective_date: str,
+        change_summary: str,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any]:
         metadata = extract_metadata(raw_file, policy_id, policy_version)
         metadata["applicationName"] = policy_name
         metadata["developer"] = developer_name
+        metadata["publisher_entity"] = developer_name
+        metadata["policy_url"] = policy_url
+        metadata["service_name"] = policy_name
+        metadata["effective_date"] = effective_date
+        metadata["document_hash"] = hash_code
+        metadata["change_summary"] = change_summary
         report = generate_report(metadata, hash_code)
         chain_record = registry.register_trusted_policy_record(
-            OnChainData(
-                rawFile=raw_file,
-                policyId=policy_id,
-                policyVersion=policy_version,
-                hashCode=hash_code,
-            )
+            self._on_chain_data(raw_file, metadata)
         )
         policy = store.create_policy(
             policy_id=policy_id,
@@ -193,21 +207,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.NOT_FOUND,
             )
             return
-        if stored["hash_code"] != submitted_hash:
-            self._json(
-                {
-                    "verified": False,
-                    "reason": "Submitted policy content does not match the latest trusted policy for that application.",
-                    "submittedHash": submitted_hash,
-                    "sqlHash": stored["hash_code"],
-                    "stored": stored,
-                },
-                HTTPStatus.CONFLICT,
-            )
-            return
-        policy_id = stored["policy_id"]
         policy_version = stored["policy_version"]
-        chain_record = registry.read_on_chain_record(policy_id, policy_version)
+        chain_record = registry.read_on_chain_record(
+            stored["developer_name"],
+            stored["policy_name"],
+            policy_version,
+        )
         if not chain_record:
             self._json(
                 {
@@ -221,12 +226,14 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         expected_hash = stored["hash_code"]
-        chain_hash = chain_record.data.hashCode or hash_policy(chain_record.data.rawFile)
+        normalized_submitted = normalize_policy_text(submitted_raw)
+        normalized_stored = normalize_policy_text(stored["raw_file"])
+        normalized_chain = normalize_policy_text(chain_record.data.rawFile)
         comparisons = {
-            "sqlMatchesChain": expected_hash == chain_hash,
-            "submittedMatchesSql": submitted_hash == expected_hash,
-            "rawFileMatchesChain": submitted_raw == chain_record.data.rawFile,
-            "policyIdMatches": stored["policy_id"] == chain_record.data.policyId,
+            "submittedTextMatchesSql": normalized_submitted == normalized_stored,
+            "sqlTextMatchesChain": normalized_stored == normalized_chain,
+            "publisherMatches": stored["developer_name"] == chain_record.data.publisherEntity,
+            "serviceNameMatches": stored["policy_name"] == chain_record.data.serviceName,
             "versionMatches": stored["policy_version"] == chain_record.data.policyVersion,
         }
         verified = all(comparisons.values())
@@ -236,10 +243,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 "comparisons": comparisons,
                 "submittedHash": submitted_hash,
                 "sqlHash": expected_hash,
-                "chainHash": chain_hash,
+                "exactHashesMatch": submitted_hash == expected_hash,
+                "normalization": "case, whitespace, and punctuation ignored",
                 "stored": stored,
                 "onChain": self._chain_to_dict(chain_record),
-                "reason": "Records match." if verified else "At least one record comparison failed.",
+                "reason": "Policy text matches after normalization." if verified else "At least one normalized text or record identity comparison failed.",
             }
         )
 
@@ -258,6 +266,46 @@ class AppHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise ValueError("JSON body must be an object")
         return data
+
+    def _on_chain_data(self, raw_file: str, metadata: dict[str, Any]) -> OnChainData:
+        return OnChainData(
+            rawFile=raw_file,
+            policyVersion=self._metadata_text(metadata, "policy_version"),
+            publisherEntity=self._metadata_text(metadata, "publisher_entity"),
+            policyUrl=self._metadata_text(metadata, "policy_url"),
+            serviceName=self._metadata_text(metadata, "service_name"),
+            effectiveDate=self._metadata_text(metadata, "effective_date"),
+            dataTypeTags=self._metadata_text(metadata, "data_type_tags"),
+            dataSourceTypes=self._metadata_text(metadata, "data_source_types"),
+            collectionContext=self._metadata_text(metadata, "collection_context"),
+            processingPurpose=self._metadata_text(metadata, "processing_purpose"),
+            permittedUsage=self._metadata_text(metadata, "permitted_usage"),
+            thirdPartySources=self._metadata_text(metadata, "third_party_sources"),
+            downstreamStakeholders=self._metadata_text(metadata, "downstream_stakeholders"),
+            thirdPartyPurpose=self._metadata_text(metadata, "third_party_purpose"),
+            sharingCondition=self._metadata_text(metadata, "sharing_condition"),
+            consentRequired=self._metadata_text(metadata, "consent_required"),
+            optOutAvailable=self._metadata_text(metadata, "opt_out_available"),
+            deletionAvailable=self._metadata_text(metadata, "deletion_available"),
+            requestChannel=self._metadata_text(metadata, "request_channel"),
+            retentionPolicy=self._metadata_text(metadata, "retention_policy"),
+            encryptionApplied=self._metadata_text(metadata, "encryption_applied"),
+            anonymisation=self._metadata_text(metadata, "anonymisation"),
+            regulatoryFramework=self._metadata_text(metadata, "regulatory_framework"),
+            crossBorderTransfer=self._metadata_text(metadata, "cross_border_transfer"),
+            childDataInvolved=self._metadata_text(metadata, "child_data_involved"),
+            changeSummary=self._metadata_text(metadata, "change_summary"),
+            contactChannel=self._metadata_text(metadata, "contact_channel"),
+            riskFlags=self._metadata_text(metadata, "risk_flags"),
+        )
+
+    def _metadata_text(self, metadata: dict[str, Any], key: str) -> str:
+        value = metadata.get(key)
+        if isinstance(value, list):
+            return ", ".join(str(item) for item in value)
+        if value is None:
+            return ""
+        return str(value)
 
     def _read_multipart(self, content_type: str) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -284,6 +332,10 @@ class AppHandler(BaseHTTPRequestHandler):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{key} is required")
         return value.strip()
+
+    def _optional_payload(self, payload: dict[str, Any], key: str) -> str:
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) else ""
 
     def _optional_query(self, query: dict[str, list[str]], key: str) -> str | None:
         values = query.get(key) or []

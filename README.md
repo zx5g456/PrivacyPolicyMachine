@@ -6,7 +6,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 
 - Create a policy by entering an application name and uploading a policy file.
 - Automatically use the upload time as the policy version.
-- Store policy metadata, analysis results, raw policy text, hash values, SQL records, and local chain transaction data.
+- Store policy metadata, analysis results, raw policy text, off-chain hash values, SQL records, and local chain transaction data.
 - Query policies by application name and view the full policy text.
 - Verify a policy by entering the application name and uploading a file or pasting policy text.
 - Switch between prototype developers in the top bar.
@@ -69,11 +69,17 @@ Required multipart fields:
 - `developer`: current prototype developer, supplied by the UI developer switcher.
 - `rawFile`: uploaded policy file.
 
+Optional multipart fields:
+
+- `policyUrl`: source URL for the published policy.
+- `effectiveDate`: effective date stated by the policy.
+- `changeSummary`: summary of what changed, mainly used during updates.
+
 The server generates:
 
-- `policyId`: UUID.
+- `policyId`: UUID used only by the off-chain database/API.
 - `policyVersion`: upload time.
-- `hashCode`: SHA-256 hash of the policy text.
+- `hashCode`: SHA-256 hash of the policy text, used only off-chain for duplicate detection and reporting.
 - local chain transaction and block data.
 
 ### `GET /api/policies`
@@ -131,9 +137,9 @@ Required multipart fields:
 
 Verification compares:
 
-- submitted content hash against the latest SQL record for that application.
-- SQL record hash against the local chain hash.
-- policy ID and upload-time version against the local chain record.
+- submitted policy text against the latest SQL record after normalizing case, whitespace, and punctuation.
+- SQL policy text against the local chain `rawFile` after the same normalization.
+- publisher, service name, and upload-time version against the local chain record.
 
 ## Data Notes
 
@@ -143,12 +149,48 @@ Verification compares:
 - If incoming policy content already exists, the API returns `409 Conflict` and does not write a new SQL or chain record.
 - `sources/dataset/` is ignored by Git so the local dataset is not uploaded.
 
-## On-chain Data Class
+## On-chain Record Class
 
 ```text
-OnChainData
+TrustedPolicyRecord
 - rawFile: string
-- policyId: string
-- policyVersion: string optional
-- hashCode: string optional
+- identity:
+  - publisherEntity: string required
+  - policyUrl: string optional
+  - serviceName: string optional
+  - effectiveDate: string optional
+  - policyVersion: string
+- dataCollection:
+  - dataTypeTags
+  - dataSourceTypes
+  - collectionContext
+  - processingPurpose
+  - permittedUsage
+- dataSharing:
+  - thirdPartySources
+  - downstreamStakeholders
+  - thirdPartyPurpose
+  - sharingCondition
+- userRights:
+  - consentRequired
+  - optOutAvailable
+  - deletionAvailable
+  - requestChannel
+- retentionSecurity:
+  - retentionPolicy
+  - encryptionApplied
+  - anonymisation
+- compliance:
+  - regulatoryFramework
+  - crossBorderTransfer
+  - childDataInvolved
+- accountability:
+  - changeSummary
+  - contactChannel
+  - riskFlags
+- previousRecordKey: bytes32
+- previousPolicyVersion: string
+- hasPreviousReference: bool
 ```
+
+`policyId` and `documentHash/hashCode` stay off-chain. They are useful for local database identity, duplicate detection, and reports, but they are not part of the public on-chain record.
