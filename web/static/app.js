@@ -27,6 +27,7 @@ const viewPages = document.querySelectorAll("[data-page]");
 let manageablePolicies = [];
 let listedPolicies = [];
 let chainRecordsByTx = new Map();
+let currentEvidence = {};
 
 const samplePolicy = `PRIVACY POLICY:
 We collect personal information including name and email when users create an account.
@@ -462,6 +463,7 @@ function metadataFallback(policy) {
     changeSummary: valueText(metadata.change_summary),
     contactChannel: valueText(metadata.contact_channel),
     riskFlags: valueText(metadata.risk_flags),
+    metadataEvidence: metadata.metadataEvidence || {},
     previousRecordKey: "",
     previousPolicyVersion: "",
     hasPreviousReference: false,
@@ -471,6 +473,7 @@ function metadataFallback(policy) {
 function renderPolicyDetailHtml(policy, onChain, data) {
   const rawFile = policy.raw_file || "";
   const rawPreview = rawFile.length > 900 ? `${rawFile.slice(0, 900)}...` : rawFile;
+  currentEvidence = data.metadataEvidence || {};
   return `
     <section class="policy-detail">
       <div class="policy-detail-header">
@@ -505,10 +508,13 @@ function renderMetadataGroupHtml(title, rows) {
     <section class="metadata-group">
       <h3>${escapeHtml(title)}</h3>
       <dl>
-        ${rows.map(([label, value]) => `
+        ${rows.map(([label, value, evidenceKey]) => `
           <div>
             <dt>${escapeHtml(label)}</dt>
-            <dd>${escapeHtml(displayValue(value))}</dd>
+            <dd>
+              <span>${escapeHtml(displayValue(value))}</span>
+              ${renderEvidenceHtml(evidenceKey)}
+            </dd>
           </div>
         `).join("")}
       </dl>
@@ -530,47 +536,76 @@ function formatOnChainMetadata(data) {
 function metadataGroups(data) {
   return [
     ["Identity", [
-      ["Publisher", data.publisherEntity],
-      ["Service", data.serviceName],
-      ["Policy URL", data.policyUrl],
-      ["Effective Date", data.effectiveDate],
-      ["Policy Version", data.policyVersion],
+      ["Publisher", data.publisherEntity, ""],
+      ["Service", data.serviceName, ""],
+      ["Policy URL", data.policyUrl, ""],
+      ["Effective Date", data.effectiveDate, ""],
+      ["Policy Version", data.policyVersion, ""],
     ]],
     ["Data Collection", [
-      ["Data Types", data.dataTypeTags],
-      ["Data Sources", data.dataSourceTypes],
-      ["Collection Context", data.collectionContext],
-      ["Processing Purpose", data.processingPurpose],
-      ["Permitted Usage", data.permittedUsage],
+      ["Data Types", data.dataTypeTags, "data_type_tags"],
+      ["Data Sources", data.dataSourceTypes, "data_source_types"],
+      ["Collection Context", data.collectionContext, "collection_context"],
+      ["Processing Purpose", data.processingPurpose, "processing_purpose"],
+      ["Permitted Usage", data.permittedUsage, "processing_purpose"],
     ]],
     ["Data Sharing", [
-      ["Third-party Sources", data.thirdPartySources],
-      ["Downstream Stakeholders", data.downstreamStakeholders],
-      ["Third-party Purpose", data.thirdPartyPurpose],
-      ["Sharing Condition", data.sharingCondition],
+      ["Third-party Sources", data.thirdPartySources, "third_party_sources"],
+      ["Downstream Stakeholders", data.downstreamStakeholders, "downstream_stakeholders"],
+      ["Third-party Purpose", data.thirdPartyPurpose, "third_party_purpose"],
+      ["Sharing Condition", data.sharingCondition, "sharing_condition"],
     ]],
     ["User Rights", [
-      ["Consent Required", data.consentRequired],
-      ["Opt-out Available", data.optOutAvailable],
-      ["Deletion Available", data.deletionAvailable],
-      ["Request Channel", data.requestChannel],
+      ["Consent Required", data.consentRequired, "consent_required"],
+      ["Opt-out Available", data.optOutAvailable, "opt_out_available"],
+      ["Deletion Available", data.deletionAvailable, "deletion_available"],
+      ["Request Channel", data.requestChannel, "request_channel"],
     ]],
     ["Retention and Security", [
-      ["Retention Policy", data.retentionPolicy],
-      ["Encryption Applied", data.encryptionApplied],
-      ["Anonymisation", data.anonymisation],
+      ["Retention Policy", data.retentionPolicy, "retention_policy"],
+      ["Encryption Applied", data.encryptionApplied, "encryption_applied"],
+      ["Anonymisation", data.anonymisation, "anonymisation"],
     ]],
     ["Compliance", [
-      ["Regulatory Framework", data.regulatoryFramework],
-      ["Cross-border Transfer", data.crossBorderTransfer],
-      ["Child Data Involved", data.childDataInvolved],
+      ["Regulatory Framework", data.regulatoryFramework, "regulatory_framework"],
+      ["Cross-border Transfer", data.crossBorderTransfer, "cross_border_transfer"],
+      ["Child Data Involved", data.childDataInvolved, "child_data_involved"],
     ]],
     ["Change and Accountability", [
-      ["Change Summary", data.changeSummary],
-      ["Contact Channel", data.contactChannel],
-      ["Risk Flags", data.riskFlags],
+      ["Change Summary", data.changeSummary, ""],
+      ["Contact Channel", data.contactChannel, "contact_channel"],
+      ["Risk Flags", data.riskFlags, ""],
     ]],
   ];
+}
+
+function renderEvidenceHtml(evidenceKey) {
+  if (!evidenceKey) {
+    return "";
+  }
+  const evidence = currentEvidence && currentEvidence[evidenceKey];
+  const lines = evidenceLines(evidence);
+  if (!lines.length) {
+    return "";
+  }
+  return `<ul class="evidence-list">
+    ${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}
+  </ul>`;
+}
+
+function evidenceLines(evidence) {
+  if (Array.isArray(evidence)) {
+    return evidence;
+  }
+  if (!evidence || typeof evidence !== "object") {
+    return [];
+  }
+  return Object.entries(evidence).flatMap(([label, sentences]) => {
+    if (!Array.isArray(sentences)) {
+      return [];
+    }
+    return sentences.map((sentence) => `${label}: ${sentence}`);
+  });
 }
 
 function renderMetadataSummaryHtml(data) {

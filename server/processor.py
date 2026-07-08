@@ -86,6 +86,50 @@ def _matches(lower: str, rules: dict[str, list[str]]) -> list[str]:
     return [label for label, keywords in rules.items() if any(keyword in lower for keyword in keywords)]
 
 
+def _sentences(raw_file: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", raw_file).strip()
+    if not normalized:
+        return []
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|(?<=:)\s+", normalized)
+        if sentence.strip()
+    ]
+
+
+def _matching_sentences(sentences: list[str], keywords: list[str], limit: int = 2) -> list[str]:
+    matches = []
+    for sentence in sentences:
+        lower_sentence = sentence.lower()
+        if any(keyword in lower_sentence for keyword in keywords):
+            matches.append(sentence)
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _rule_evidence(raw_file: str, rules: dict[str, dict[str, list[str]]]) -> dict[str, dict[str, list[str]]]:
+    sentences = _sentences(raw_file)
+    evidence = {}
+    for field, field_rules in rules.items():
+        field_evidence = {}
+        for label, keywords in field_rules.items():
+            matches = _matching_sentences(sentences, keywords)
+            if matches:
+                field_evidence[label] = matches
+        evidence[field] = field_evidence
+    return evidence
+
+
+def _field_evidence(raw_file: str, evidence_rules: dict[str, list[str]]) -> dict[str, list[str]]:
+    sentences = _sentences(raw_file)
+    return {
+        field: _matching_sentences(sentences, keywords)
+        for field, keywords in evidence_rules.items()
+        if _matching_sentences(sentences, keywords)
+    }
+
+
 def _yes_no_unclear(lower: str, positive: list[str], negative: list[str] | None = None) -> str:
     if negative and any(term in lower for term in negative):
         return "no"
@@ -110,6 +154,7 @@ def extract_metadata(raw_file: str, policy_id: str, policy_version: str | None) 
         name: _matches(lower, rules)
         for name, rules in METADATA_RULES.items()
     }
+    metadata_evidence = _rule_evidence(raw_file, METADATA_RULES)
     consent_required = _yes_no_unclear(lower, ["consent", "agree", "permission", "opt in"])
     opt_out_available = _yes_no_unclear(lower, ["opt out", "unsubscribe", "disable", "withdraw"])
     deletion_available = _yes_no_unclear(lower, ["delete your data", "delete your account", "erasure", "remove your data"])
@@ -121,6 +166,24 @@ def extract_metadata(raw_file: str, policy_id: str, policy_version: str | None) 
     sharing_condition = "mentioned" if any(term in lower for term in ["share when", "we may share", "with your consent", "as required by law"]) else "unclear"
     request_channel = "mentioned" if any(term in lower for term in ["contact us", "email us", "privacy request", "request form"]) else "unclear"
     contact_channel = "mentioned" if any(term in lower for term in ["contact us", "email", "privacy@"]) else "unclear"
+    metadata_evidence.update(
+        _field_evidence(
+            raw_file,
+            {
+                "sharing_condition": ["share when", "we may share", "with your consent", "as required by law"],
+                "consent_required": ["consent", "agree", "permission", "opt in"],
+                "opt_out_available": ["opt out", "unsubscribe", "disable", "withdraw"],
+                "deletion_available": ["delete your data", "delete your account", "erasure", "remove your data"],
+                "request_channel": ["contact us", "email us", "privacy request", "request form"],
+                "retention_policy": KEYWORD_RULES["retention"],
+                "encryption_applied": ["encrypt", "encryption"],
+                "anonymisation": ["anonymous", "anonymized", "anonymised", "de-identified", "aggregate"],
+                "cross_border_transfer": ["international", "cross-border", "outside your country", "other countries"],
+                "child_data_involved": ["child", "children", "under 13", "minor"],
+                "contact_channel": ["contact us", "email", "privacy@"],
+            },
+        )
+    )
     risk_flags = []
     if retention_policy == "unclear":
         risk_flags.append("unclear_retention")
@@ -159,6 +222,7 @@ def extract_metadata(raw_file: str, policy_id: str, policy_version: str | None) 
         "sectionCount": len(sections),
         "sections": sections[:12],
         "keywordHits": keyword_hits,
+        "metadataEvidence": metadata_evidence,
     }
 
 

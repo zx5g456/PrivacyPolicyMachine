@@ -413,6 +413,23 @@ button {
   color: #2f3b4a;
 }
 
+.evidence-list {
+  display: grid;
+  gap: 6px;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.evidence-list li {
+  border-left: 3px solid #b7d7cd;
+  padding: 6px 8px;
+  background: #f6faf8;
+  color: #52606f;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .raw-preview {
   border: 1px solid #dce3ec;
   border-radius: 7px;
