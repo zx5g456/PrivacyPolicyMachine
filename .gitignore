@@ -5,4 +5,5 @@ source_size_analysis/
 __pycache__/
 *.pyc
 .env
+*.zshrc
 .DS_Store

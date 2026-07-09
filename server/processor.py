@@ -83,6 +83,38 @@ REVIEW_STATUSES = {
     REVIEW_EDITED,
 }
 
+NEGATION_TERMS = {
+    "no",
+    "not",
+    "never",
+    "neither",
+    "nor",
+    "without",
+    "cannot",
+    "can't",
+    "don't",
+    "doesn't",
+    "didn't",
+    "won't",
+    "isn't",
+    "aren't",
+}
+NEGATION_WINDOW = 4
+COMPLEX_SENTENCE_WORDS = 30
+COMPLEX_CLAUSE_MARKERS = {
+    "although",
+    "because",
+    "but",
+    "except",
+    "however",
+    "if",
+    "unless",
+    "whereas",
+    "while",
+    "which",
+    "who",
+}
+
 
 def hash_policy(raw_file: str) -> str:
     return hashlib.sha256(raw_file.encode("utf-8")).hexdigest()
@@ -144,6 +176,52 @@ def _field_evidence(raw_file: str, evidence_rules: dict[str, list[str]]) -> dict
         if _matching_sentences(sentences, keywords)
     }
 
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"\b[\w']+\b", text.casefold())
+
+
+def _keyword_is_negated(text: str, keyword: str, window: int = NEGATION_WINDOW) -> bool:
+    """Return whether a negation occurs close to a keyword occurrence."""
+    text_tokens = _tokens(text)
+    keyword_tokens = _tokens(keyword)
+    if not keyword_tokens:
+        return False
+
+    width = len(keyword_tokens)
+    for start in range(len(text_tokens) - width + 1):
+        if text_tokens[start:start + width] != keyword_tokens:
+            continue
+        nearby = text_tokens[max(0, start - window):min(len(text_tokens), start + width + window)]
+        for index, token in enumerate(nearby):
+            if token not in NEGATION_TERMS:
+                continue
+            # "not only X" introduces an addition, rather than negating X.
+            if token == "not" and index + 1 < len(nearby) and nearby[index + 1] == "only":
+                continue
+            return True
+    return False
+
+
+def _evidence_has_negated_keyword(evidence: list[str], keywords: list[str]) -> bool:
+    return any(
+        _keyword_is_negated(sentence, keyword)
+        for sentence in evidence
+        for keyword in keywords
+    )
+
+
+def _is_complex_sentence(sentence: str) -> bool:
+    tokens = _tokens(sentence)
+    clause_markers = sum(token in COMPLEX_CLAUSE_MARKERS for token in tokens)
+    punctuation_clauses = len(re.findall(r"[,;:]", sentence))
+    return (
+        len(tokens) >= COMPLEX_SENTENCE_WORDS
+        or clause_markers >= 2
+        or clause_markers >= 1 and punctuation_clauses >= 2
+    )
+
+
 # Calculate confidence based on the presence of evidence and keywords. If the value is "unclear", return a low confidence. If there is no evidence, return a medium confidence. If there is evidence and any keyword matches, return a high confidence. Otherwise, return a medium-high confidence.
 def _confidence_for_evidence(evidence: list[str], keywords: list[str], value: Any) -> float:
     if value == "unclear":
@@ -153,8 +231,15 @@ def _confidence_for_evidence(evidence: list[str], keywords: list[str], value: An
 
     joined = " ".join(evidence).lower()
     if any(keyword in joined for keyword in keywords if " " in keyword or len(keyword) >= 8):
-        return 0.9
-    return 0.75
+        confidence = 0.9
+    else:
+        confidence = 0.75
+
+    if _evidence_has_negated_keyword(evidence, keywords):
+        confidence -= 0.25
+    if any(_is_complex_sentence(sentence) for sentence in evidence):
+        confidence -= 0.15
+    return round(max(0.0, confidence), 2)
 
 
 def _review_status(confidence: float, value: Any, force_review: bool = False) -> str:
@@ -214,8 +299,18 @@ def _metadata_assessment(
 def _yes_no_unclear(lower: str, positive: list[str], negative: list[str] | None = None) -> str:
     if negative and any(term in lower for term in negative):
         return "no"
-    if any(term in lower for term in positive):
-        return "yes"
+    sentences = _sentences(lower)
+    found_negated = False
+    for sentence in sentences:
+        for term in positive:
+            if term not in sentence:
+                continue
+            if _keyword_is_negated(sentence, term):
+                found_negated = True
+            else:
+                return "yes"
+    if found_negated:
+        return "no"
     return "unclear"
 
 
