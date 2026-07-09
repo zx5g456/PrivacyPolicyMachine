@@ -28,6 +28,7 @@ let manageablePolicies = [];
 let listedPolicies = [];
 let chainRecordsByTx = new Map();
 let currentEvidence = {};
+let currentAssessment = {};
 
 const samplePolicy = `PRIVACY POLICY:
 We collect personal information including name and email when users create an account.
@@ -464,6 +465,7 @@ function metadataFallback(policy) {
     contactChannel: valueText(metadata.contact_channel),
     riskFlags: valueText(metadata.risk_flags),
     metadataEvidence: metadata.metadataEvidence || {},
+    metadataAssessment: metadata.metadataAssessment || {},
     previousRecordKey: "",
     previousPolicyVersion: "",
     hasPreviousReference: false,
@@ -474,6 +476,7 @@ function renderPolicyDetailHtml(policy, onChain, data) {
   const rawFile = policy.raw_file || "";
   const rawPreview = rawFile.length > 900 ? `${rawFile.slice(0, 900)}...` : rawFile;
   currentEvidence = data.metadataEvidence || {};
+  currentAssessment = data.metadataAssessment || {};
   return `
     <section class="policy-detail">
       <div class="policy-detail-header">
@@ -513,6 +516,7 @@ function renderMetadataGroupHtml(title, rows) {
             <dt>${escapeHtml(label)}</dt>
             <dd>
               <span>${escapeHtml(displayValue(value))}</span>
+              ${renderAssessmentHtml(evidenceKey, value)}
               ${renderEvidenceHtml(evidenceKey)}
             </dd>
           </div>
@@ -591,6 +595,41 @@ function renderEvidenceHtml(evidenceKey) {
   return `<ul class="evidence-list">
     ${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}
   </ul>`;
+}
+
+function renderAssessmentHtml(assessmentKey, value) {
+  if (!assessmentKey) {
+    return "";
+  }
+  const assessment = assessmentForValue(assessmentKey, value);
+  if (!assessment) {
+    return "";
+  }
+  const status = assessment.review_status || "auto_extracted";
+  const confidence = Number(assessment.confidence);
+  const confidenceText = Number.isFinite(confidence) ? confidence.toFixed(2) : "n/a";
+  return `<div class="assessment ${status === "needs_review" ? "needs-review" : ""}">
+    <span>Confidence ${escapeHtml(confidenceText)}</span>
+    <span>${escapeHtml(statusLabel(status))}</span>
+  </div>`;
+}
+
+function assessmentForValue(assessmentKey, value) {
+  const assessment = currentAssessment && currentAssessment[assessmentKey];
+  if (!assessment) {
+    return null;
+  }
+  if (assessment.confidence !== undefined) {
+    return assessment;
+  }
+  const values = valueText(value).split(",").map((item) => item.trim()).filter(Boolean);
+  return values
+    .map((item) => assessment[item])
+    .find(Boolean) || null;
+}
+
+function statusLabel(status) {
+  return status.replaceAll("_", " ");
 }
 
 function evidenceLines(evidence) {
