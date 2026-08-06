@@ -21,6 +21,9 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - `server/app.py`: HTTP server, API routes, policy registration, query, update, and verification.
 - `server/storage.py`: SQLite storage layer.
 - `server/processor.py`: simple metadata extraction, hash generation, and report generation.
+- `server/llm_models.py`: local LLM result models and domain errors.
+- `server/llm_client.py`: Ollama client, prompt, and connection configuration.
+- `server/llm_processor.py`: policy chunking, evidence validation, retries, and result aggregation.
 - `server/blockchain.py`: local append-only ledger that mirrors an on-chain registration flow.
 - `contracts/TrustedPolicyRegistry.sol`: Solidity contract sketch for a real on-chain deployment.
 - `data/policies.db`: local SQLite database.
@@ -31,7 +34,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 From the project root:
 
 ```bash
-python3 server/app.py
+python3 -m server.app
 ```
 
 The server tries `http://127.0.0.1:8000` first. If port `8000` is already in use, it automatically chooses the next available port and prints the URL, for example:
@@ -45,7 +48,7 @@ Open the printed URL in your browser.
 You can also force a port:
 
 ```bash
-PORT=8002 python3 server/app.py
+PORT=8002 python3 -m server.app
 ```
 
 ## UI Workflow
@@ -140,6 +143,31 @@ Verification compares:
 - submitted policy text against the latest SQL record after normalizing case, whitespace, and punctuation.
 - SQL policy text against the local chain `rawFile` after the same normalization.
 - publisher, service name, and upload-time version against the local chain record.
+
+### `POST /api/analyze`
+
+Analyze policy text with a local Ollama model. This preview endpoint does not
+write to SQLite or the blockchain.
+
+Accepted JSON fields:
+
+- `rawText`: pasted privacy-policy text.
+
+Alternatively, submit multipart form data with a `rawFile` upload. The response
+contains structured results for `sharing_condition`, `retention_policy`,
+`cross_border_transfer`, and `child_data_involved`, along with evidence and
+review/error information.
+
+The default model is `qwen3:4b-instruct`. It can be changed with
+`OLLAMA_MODEL`; timeout and retry count can be changed with
+`OLLAMA_TIMEOUT_SECONDS` and `OLLAMA_RETRIES`.
+
+```bash
+ollama pull qwen3:4b-instruct
+curl http://127.0.0.1:8000/api/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"rawText":"We retain account records for seven years."}'
+```
 
 ## Data Notes
 

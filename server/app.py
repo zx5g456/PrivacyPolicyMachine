@@ -17,9 +17,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from blockchain import OnChainData, TrustedPolicyRegistry
-from processor import extract_metadata, generate_report, hash_policy, normalize_policy_text
-from storage import PolicyStore
+from .blockchain import OnChainData, TrustedPolicyRegistry
+from .llm_client import DEFAULT_MODEL
+from .llm_models import (
+    LLMConnectionError,
+    LLMProcessorError,
+    LLMTimeoutError,
+)
+from .llm_processor import PolicyLLMProcessor
+from .processor import extract_metadata, generate_report, hash_policy, normalize_policy_text
+from .storage import PolicyStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,8 +79,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._update_policy(payload)
             elif parsed.path == "/api/verify":
                 self._verify_policy(payload)
+            elif parsed.path == "/api/analyze":
+                self._analyze_policy_with_llm(payload)
             else:
                 self._json({"error": "Route not found"}, HTTPStatus.NOT_FOUND)
+        except LLMTimeoutError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.GATEWAY_TIMEOUT)
+        except (LLMConnectionError, LLMProcessorError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
         except ValueError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
@@ -248,6 +261,29 @@ class AppHandler(BaseHTTPRequestHandler):
                 "stored": stored,
                 "onChain": self._chain_to_dict(chain_record),
                 "reason": "Policy text matches after normalization." if verified else "At least one normalized text or record identity comparison failed.",
+            }
+        )
+
+    def _analyze_policy_with_llm(self, payload: dict[str, Any]) -> None:
+        """Analyze a policy without writing to SQLite or the blockchain.
+
+        This preview endpoint intentionally stays separate from registration.
+        The returned evidence and review flags can be inspected before a later
+        workflow decides whether any result is trustworthy enough to persist.
+        """
+        raw_policy = self._submitted_policy(payload)
+        processor = PolicyLLMProcessor(
+            model=os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL),
+            timeout_seconds=float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "90")),
+            retries=int(os.environ.get("OLLAMA_RETRIES", "2")),
+        )
+        analysis = processor.analyze(raw_policy)
+        self._json(
+            {
+                "analysis": analysis.model_dump(),
+                "persisted": False,
+                "onChain": False,
+                "message": "Policy analyzed locally. No database or blockchain write was performed.",
             }
         )
 
