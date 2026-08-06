@@ -10,7 +10,7 @@ from urllib import error, request
 from .llm_models import LLMConnectionError, LLMResponseError, LLMTimeoutError
 
 
-DEFAULT_MODEL = "qwen3:4b-instruct"
+DEFAULT_MODEL = "qwen3.5:9b"
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 DEFAULT_TIMEOUT_SECONDS = 90.0
 DEFAULT_RETRIES = 2

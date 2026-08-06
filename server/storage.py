@@ -20,6 +20,7 @@ class PolicyStore:
         developer_name: str,
         raw_file: str,
         hash_code: str,
+        upload_method: str,
         metadata: dict[str, Any],
         report: dict[str, Any],
         tx_hash: str,
@@ -28,9 +29,9 @@ class PolicyStore:
             conn.execute(
                 """
                 insert into policies (
-                    policy_id, policy_name, policy_version, developer_name, raw_file, hash_code, metadata_json,
-                    report_json, tx_hash
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    policy_id, policy_name, policy_version, developer_name, raw_file, hash_code, upload_method,
+                    metadata_json, report_json, tx_hash
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     policy_id,
@@ -39,6 +40,7 @@ class PolicyStore:
                     developer_name,
                     raw_file,
                     hash_code,
+                    upload_method,
                     json.dumps(metadata, ensure_ascii=False),
                     json.dumps(report, ensure_ascii=False),
                     tx_hash,
@@ -139,6 +141,7 @@ class PolicyStore:
                     developer_name text not null default '',
                     raw_file text not null,
                     hash_code text not null,
+                    upload_method text not null default 'fast',
                     metadata_json text not null,
                     report_json text not null,
                     tx_hash text not null,
@@ -154,6 +157,8 @@ class PolicyStore:
                 conn.execute("alter table policies add column policy_name text not null default ''")
             if "developer_name" not in columns:
                 conn.execute("alter table policies add column developer_name text not null default ''")
+            if "upload_method" not in columns:
+                conn.execute("alter table policies add column upload_method text not null default 'fast'")
             conn.execute("create index if not exists idx_policies_policy_id on policies(policy_id)")
             conn.execute("create index if not exists idx_policies_hash_code on policies(hash_code)")
             conn.execute("create index if not exists idx_policies_policy_name on policies(policy_name)")

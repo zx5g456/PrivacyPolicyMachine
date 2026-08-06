@@ -32,6 +32,7 @@
         <button class="view-tab" type="button" data-view="records">Records</button>
         <button class="view-tab" type="button" data-view="verify">Verify</button>
         <button class="view-tab" type="button" data-view="update">Update</button>
+        <button class="view-tab" id="reviewTab" type="button" data-view="review" hidden>Review</button>
       </nav>
 
       <section class="workspace">
@@ -181,8 +182,61 @@
             <div class="verification" id="updateBox">Choose a policy to update.</div>
           </form>
         </section>
+
+        <section class="view-page" data-page="review" hidden>
+          <section class="panel review-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow" id="reviewMethod">Pending review</p>
+                <h2>Review Extracted Metadata</h2>
+              </div>
+              <button class="outline review-cancel" id="cancelReview" type="button">Cancel</button>
+            </div>
+            <p class="review-guidance" id="reviewGuidance"></p>
+            <div class="review-layout">
+              <div class="review-fields" id="reviewFields"></div>
+              <div>
+                <h3>Policy text</h3>
+                <pre class="review-policy" id="reviewPolicy"></pre>
+              </div>
+            </div>
+            <div class="review-actions">
+              <button class="primary" id="confirmReview" type="button">Confirm and Register</button>
+            </div>
+            <div class="verification" id="reviewStatus">Review every field before registration.</div>
+          </section>
+        </section>
       </section>
     </main>
+
+    <div class="method-dialog-backdrop" id="methodDialog" hidden>
+      <section class="method-dialog" role="dialog" aria-modal="true" aria-labelledby="methodDialogTitle">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Registration workflow</p>
+            <h2 id="methodDialogTitle">Choose an upload method</h2>
+          </div>
+          <button class="icon-button" id="closeMethodDialog" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="method-options">
+          <button class="method-card" type="button" data-upload-method="fast">
+            <strong>Fast Upload</strong>
+            <span>Run keyword analysis and register immediately.</span>
+            <small>POST /api/policies</small>
+          </button>
+          <button class="method-card" type="button" data-upload-method="ai">
+            <strong>AI Upload</strong>
+            <span>Run Ollama analysis, then review its findings before registration.</span>
+            <small>POST /api/analyze</small>
+          </button>
+          <button class="method-card" type="button" data-upload-method="manual">
+            <strong>Manual Upload</strong>
+            <span>Run keyword analysis, then review and edit every result.</span>
+            <small>POST /api/policies/manual</small>
+          </button>
+        </div>
+      </section>
+    </div>
 
     <script src="/app.js"></script>
   </body>

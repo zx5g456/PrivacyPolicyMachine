@@ -12,6 +12,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - Switch between prototype developers in the top bar.
 - Update only the policies uploaded by the selected developer.
 - Prevent duplicate policy content from being registered twice.
+- Choose fast, AI-assisted, or manual-review registration and retain that method with each database record.
 
 ## Project Structure
 
@@ -55,16 +56,20 @@ PORT=8002 python3 -m server.app
 
 1. Choose a developer from the top-bar `Developer` selector.
 2. In `Create Policy`, enter an `Application Name` and upload a policy file.
-3. The app registers the policy with a generated UUID and an upload-time policy version.
-4. Use `Query` to search by application name. Matching records appear in `Registered Records`, and the latest match's full policy text is shown in the Query panel.
-5. Use `Verification` by entering the application name and either uploading a policy file or pasting policy text.
-6. Use `Update Policy` to update an existing policy. The dropdown only shows policies uploaded by the currently selected developer.
+3. Choose Fast Upload, AI Upload, or Manual Upload.
+4. AI and Manual uploads open a review page before anything is persisted; Fast Upload registers immediately.
+5. The app registers the approved policy with a generated UUID and an upload-time policy version.
+6. Use `Query` to search by application name. Matching records appear in `Registered Records`, and the latest match's full policy text is shown in the Query panel.
+7. Use `Verification` by entering the application name and either uploading a policy file or pasting policy text.
+8. Use `Update Policy` to update an existing policy. The dropdown only shows policies uploaded by the currently selected developer.
 
 ## API
 
 ### `POST /api/policies`
 
 Create and register a new policy.
+
+This is the Fast Upload route. It runs keyword analysis and persists immediately with `upload_method=fast`.
 
 Required multipart fields:
 
@@ -84,6 +89,18 @@ The server generates:
 - `policyVersion`: upload time.
 - `hashCode`: SHA-256 hash of the policy text, used only off-chain for duplicate detection and reporting.
 - local chain transaction and block data.
+
+### `POST /api/analyze`
+
+Run local Ollama analysis and return a review draft. Nothing is persisted. The response uses `uploadMethod=ai` and `requiresReview=true`.
+
+### `POST /api/policies/manual`
+
+Run keyword analysis and return a review draft. Nothing is persisted. The response uses `uploadMethod=manual` and `requiresReview=true`.
+
+### `POST /api/policies/reviewed`
+
+Register an AI or manually reviewed draft. Requires the original policy file, `uploadMethod`, and `metadataJson`. The server assigns the final ID, version, hash, and identity metadata.
 
 ### `GET /api/policies`
 
@@ -158,12 +175,12 @@ contains structured results for `sharing_condition`, `retention_policy`,
 `cross_border_transfer`, and `child_data_involved`, along with evidence and
 review/error information.
 
-The default model is `qwen3:4b-instruct`. It can be changed with
+The default model is `qwen3.5:9b`. It can be changed with
 `OLLAMA_MODEL`; timeout and retry count can be changed with
 `OLLAMA_TIMEOUT_SECONDS` and `OLLAMA_RETRIES`.
 
 ```bash
-ollama pull qwen3:4b-instruct
+ollama pull qwen3.5:9b
 curl http://127.0.0.1:8000/api/analyze \
   -H 'Content-Type: application/json' \
   -d '{"rawText":"We retain account records for seven years."}'

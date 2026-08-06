@@ -139,8 +139,13 @@ h2 {
 }
 
 .view-page[data-page="verify"],
-.view-page[data-page="update"] {
+.view-page[data-page="update"],
+.view-page[data-page="review"] {
   max-width: 760px;
+}
+
+.view-page[data-page="review"] {
+  max-width: 1180px;
 }
 
 .view-page[data-page="query"],
@@ -584,6 +589,166 @@ button {
   min-width: 0;
 }
 
+.method-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(20, 31, 45, 0.58);
+}
+
+.method-dialog-backdrop[hidden] {
+  display: none;
+}
+
+.method-dialog {
+  width: min(860px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(20, 31, 45, 0.25);
+  padding: 22px;
+}
+
+.method-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.method-card {
+  display: grid;
+  gap: 10px;
+  min-height: 170px;
+  border: 1px solid #cfd8e4;
+  background: #f9fbfc;
+  color: var(--ink);
+  padding: 18px;
+  text-align: left;
+}
+
+.method-card:hover,
+.method-card:focus-visible {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(22, 119, 97, 0.12);
+}
+
+.method-card strong {
+  color: var(--green);
+  font-size: 17px;
+}
+
+.method-card span {
+  color: #465568;
+  line-height: 1.45;
+}
+
+.method-card small {
+  align-self: end;
+  color: var(--muted);
+}
+
+.review-panel,
+.review-fields {
+  display: grid;
+  gap: 18px;
+}
+
+.review-field-group {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dce3ec;
+  border-radius: 7px;
+  background: #fbfcfd;
+  padding: 12px;
+}
+
+.review-field-group h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.review-list-items {
+  display: grid;
+  gap: 10px;
+}
+
+.review-list-item {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.35fr) minmax(240px, 0.65fr);
+  gap: 12px;
+  align-items: start;
+  border-top: 1px solid #e3e9f0;
+  padding-top: 10px;
+}
+
+.review-item-toggle {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  color: var(--ink);
+}
+
+.review-item-toggle input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+}
+
+.review-evidence-label {
+  color: #536173;
+  font-size: 12px;
+}
+
+.review-evidence {
+  min-height: 76px;
+  background: #fff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.review-cancel {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.review-guidance {
+  margin: 0;
+  color: var(--muted);
+}
+
+.review-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(360px, 1.1fr);
+  gap: 18px;
+}
+
+.review-policy {
+  max-height: 680px;
+  overflow: auto;
+  border: 1px solid #dce3ec;
+  border-radius: 7px;
+  background: #f9fbfc;
+  padding: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.review-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.review-actions button {
+  min-width: 210px;
+}
+
 @media (max-width: 860px) {
   .topbar,
   .workspace,
@@ -607,7 +772,10 @@ button {
   }
 
   .create-grid,
-  .records-layout {
+  .records-layout,
+  .review-layout,
+  .method-options,
+  .review-list-item {
     grid-template-columns: 1fr;
   }
 

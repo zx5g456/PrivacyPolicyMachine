@@ -22,6 +22,16 @@ const recordList = document.querySelector("#recordList");
 const recordCount = document.querySelector("#recordCount");
 const manageableCount = document.querySelector("#manageableCount");
 const systemStatus = document.querySelector("#systemStatus");
+const methodDialog = document.querySelector("#methodDialog");
+const closeMethodDialog = document.querySelector("#closeMethodDialog");
+const reviewTab = document.querySelector("#reviewTab");
+const reviewMethod = document.querySelector("#reviewMethod");
+const reviewGuidance = document.querySelector("#reviewGuidance");
+const reviewFields = document.querySelector("#reviewFields");
+const reviewPolicy = document.querySelector("#reviewPolicy");
+const reviewStatus = document.querySelector("#reviewStatus");
+const confirmReview = document.querySelector("#confirmReview");
+const cancelReview = document.querySelector("#cancelReview");
 const viewTabs = document.querySelectorAll("[data-view]");
 const viewPages = document.querySelectorAll("[data-page]");
 let manageablePolicies = [];
@@ -29,6 +39,42 @@ let listedPolicies = [];
 let chainRecordsByTx = new Map();
 let currentEvidence = {};
 let currentAssessment = {};
+let pendingReview = null;
+
+const reviewFieldDefinitions = [
+  ["data_type_tags", "Data Types", "list"],
+  ["data_source_types", "Data Sources", "list"],
+  ["collection_context", "Collection Context", "list"],
+  ["processing_purpose", "Processing Purpose", "list"],
+  ["third_party_sources", "Third-party Sources", "list"],
+  ["downstream_stakeholders", "Downstream Stakeholders", "list"],
+  ["third_party_purpose", "Third-party Purpose", "list"],
+  ["regulatory_framework", "Regulatory Framework", "list"],
+  ["sharing_condition", "Sharing Condition", "status"],
+  ["consent_required", "Consent Required", "status"],
+  ["opt_out_available", "Opt-out Available", "status"],
+  ["deletion_available", "Deletion Available", "status"],
+  ["request_channel", "Request Channel", "status"],
+  ["retention_policy", "Retention Policy", "status"],
+  ["encryption_applied", "Encryption Applied", "status"],
+  ["anonymisation", "Anonymisation", "status"],
+  ["cross_border_transfer", "Cross-border Transfer", "status"],
+  ["child_data_involved", "Child Data Involved", "status"],
+  ["contact_channel", "Contact Channel", "status"],
+  ["risk_flags", "Risk Flags", "list"],
+];
+
+const reviewListOptions = {
+  data_type_tags: ["location", "voice_recording", "eye_tracking", "device_id", "payment_info", "contact_info"],
+  data_source_types: ["user_provided", "device_sensor", "third_party_login", "cookies", "xr_headset_sensor"],
+  collection_context: ["during_payment", "account_registration", "service_usage", "customer_support"],
+  processing_purpose: ["advertising", "analytics", "payment_processing", "service_provision", "security"],
+  third_party_sources: ["google_login", "facebook_login", "payment_processor"],
+  downstream_stakeholders: ["cloud_provider", "analytics_provider", "advertising_partner", "payment_processor"],
+  third_party_purpose: ["payment_processing", "analytics", "advertising", "service_delivery"],
+  regulatory_framework: ["GDPR", "CCPA", "COPPA", "HIPAA"],
+  risk_flags: ["unclear_retention", "vague_third_party_sharing", "no_deletion_method", "sensitive_data_involved"],
+};
 
 const samplePolicy = `PRIVACY POLICY:
 We collect personal information including name and email when users create an account.
@@ -64,27 +110,24 @@ policyForm.addEventListener("submit", async (event) => {
     policyForm.applicationName.focus();
     return;
   }
-  const payload = new FormData(policyForm);
-  setBusy(true);
-  try {
-    const result = await postForm("/api/policies", payload);
-    renderProcessingResult(result);
-    if (policyForm.rawFile.files.length) {
-      const transfer = new DataTransfer();
-      transfer.items.add(policyForm.rawFile.files[0]);
-      verifyForm.rawFile.files = transfer.files;
-    }
-    verifyForm.applicationName.value = result.policy.policy_name;
-    await loadRecords();
-    managedPolicySelect.value = result.policy.policy_id;
-    syncSelectedPolicy();
-    showView("create");
-  } catch (error) {
-    reportBox.textContent = formatError(error);
-  } finally {
-    setBusy(false);
+  if (!policyForm.rawFile.files.length) {
+    reportBox.textContent = "Please upload a policy file.";
+    return;
+  }
+  methodDialog.hidden = false;
+});
+
+closeMethodDialog.addEventListener("click", () => { methodDialog.hidden = true; });
+methodDialog.addEventListener("click", (event) => {
+  if (event.target === methodDialog) {
+    methodDialog.hidden = true;
   }
 });
+document.querySelectorAll("[data-upload-method]").forEach((button) => {
+  button.addEventListener("click", () => startUploadWorkflow(button.dataset.uploadMethod));
+});
+cancelReview.addEventListener("click", clearReview);
+confirmReview.addEventListener("click", registerReviewedPolicy);
 
 queryForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -168,6 +211,7 @@ updateForm.addEventListener("submit", async (event) => {
       `Policy ID: ${result.policy.policy_id}`,
       `Application Name: ${result.policy.policy_name}`,
       `Developer: ${result.policy.developer_name}`,
+      `Upload method: ${uploadMethodLabel(result.policy.upload_method)}`,
       `Uploaded: ${result.policy.policy_version}`,
       `Hash: ${shorten(result.policy.hash_code)}`,
     ].join("\n");
@@ -194,6 +238,200 @@ async function postForm(path, payload) {
     throw error;
   }
   return data;
+}
+
+async function startUploadWorkflow(method) {
+  methodDialog.hidden = true;
+  const path = {
+    fast: "/api/policies",
+    ai: "/api/analyze",
+    manual: "/api/policies/manual",
+  }[method];
+  if (!path) {
+    return;
+  }
+  setBusy(true);
+  reportBox.textContent = method === "ai" ? "Running local AI analysis..." : "Running keyword analysis...";
+  try {
+    const result = await postForm(path, new FormData(policyForm));
+    if (method === "fast") {
+      await completeRegistration(result);
+      return;
+    }
+    openReview(result, method);
+  } catch (error) {
+    reportBox.textContent = formatError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function openReview(result, method) {
+  normalizeReviewMetadata(result.metadata);
+  pendingReview = {
+    method,
+    metadata: structuredClone(result.metadata),
+    file: policyForm.rawFile.files[0],
+    applicationName: policyForm.applicationName.value.trim(),
+    developer: policyForm.developer.value,
+    policyUrl: policyForm.policyUrl.value.trim(),
+    effectiveDate: policyForm.effectiveDate.value,
+  };
+  reviewMethod.textContent = method === "ai" ? "AI upload · human approval required" : "Manual upload · keyword draft";
+  reviewGuidance.textContent = method === "ai"
+    ? "The local model produced the draft below. Check every value and correct it before registration."
+    : "Keyword rules produced the draft below. Edit any incorrect or incomplete values before registration.";
+  reviewPolicy.textContent = pendingReview.file ? "Loading policy text..." : "Policy text unavailable.";
+  if (pendingReview.file) {
+    pendingReview.file.text().then((text) => { reviewPolicy.textContent = text; });
+  }
+  reviewFields.innerHTML = reviewFieldDefinitions.map(([key, label, type]) => {
+    const value = pendingReview.metadata[key];
+    const evidence = reviewEvidenceLines(pendingReview.metadata.metadataEvidence && pendingReview.metadata.metadataEvidence[key]);
+    const evidenceControl = `<label class="review-evidence-label">Evidence
+      <textarea class="review-evidence" data-review-evidence="${escapeHtml(key)}" placeholder="No evidence. Add one exact quotation per line if available.">${escapeHtml(evidence.join("\n"))}</textarea>
+    </label>`;
+    if (type === "status") {
+      const choices = ["yes", "no", "unclear"];
+      if (value && !choices.includes(String(value))) {
+        choices.push(String(value));
+      }
+      return `<section class="review-field-group"><label>${escapeHtml(label)}
+          <select data-review-field="${escapeHtml(key)}" data-review-type="status">
+            ${choices.map((choice) => `<option value="${escapeHtml(choice)}" ${String(value) === choice ? "selected" : ""}>${escapeHtml(choice)}</option>`).join("")}
+          </select>
+        </label>${evidenceControl}</section>`;
+    }
+    return renderReviewListField(key, label, value, pendingReview.metadata.metadataEvidence[key]);
+  }).join("");
+  reviewStatus.className = "verification";
+  reviewStatus.textContent = "Review every field before registration.";
+  reviewTab.hidden = false;
+  showView("review", { skipLoad: true });
+}
+
+async function registerReviewedPolicy() {
+  if (!pendingReview) {
+    return;
+  }
+  reviewFields.querySelectorAll("[data-review-field]").forEach((control) => {
+    const key = control.dataset.reviewField;
+    pendingReview.metadata[key] = control.value;
+  });
+  pendingReview.metadata.metadataEvidence = pendingReview.metadata.metadataEvidence || {};
+  reviewFields.querySelectorAll("[data-review-evidence]").forEach((control) => {
+    pendingReview.metadata.metadataEvidence[control.dataset.reviewEvidence] = control.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  });
+  reviewFieldDefinitions.filter((definition) => definition[2] === "list").forEach(([key]) => {
+    const selectedItems = [...reviewFields.querySelectorAll(`[data-review-list-item="${key}"]:checked`)]
+      .map((control) => control.value);
+    const itemEvidence = {};
+    reviewFields.querySelectorAll(`[data-review-item-evidence="${key}"]`).forEach((control) => {
+      const lines = control.value.split("\n").map((line) => line.trim()).filter(Boolean);
+      if (selectedItems.includes(control.dataset.reviewItem) && lines.length) {
+        itemEvidence[control.dataset.reviewItem] = lines;
+      }
+    });
+    pendingReview.metadata[key] = selectedItems;
+    pendingReview.metadata.metadataEvidence[key] = itemEvidence;
+  });
+  const payload = new FormData();
+  payload.append("applicationName", pendingReview.applicationName);
+  payload.append("developer", pendingReview.developer);
+  payload.append("policyUrl", pendingReview.policyUrl);
+  payload.append("effectiveDate", pendingReview.effectiveDate);
+  payload.append("uploadMethod", pendingReview.method);
+  payload.append("metadataJson", JSON.stringify(pendingReview.metadata));
+  payload.append("rawFile", pendingReview.file, pendingReview.file.name);
+  setBusy(true);
+  try {
+    const result = await postForm("/api/policies/reviewed", payload);
+    await completeRegistration(result);
+    clearReview();
+    showView("create", { skipLoad: true });
+  } catch (error) {
+    reviewStatus.className = "verification fail";
+    reviewStatus.textContent = formatError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function renderReviewListField(key, label, value, evidence) {
+  const selected = Array.isArray(value) ? value.map(String) : [];
+  const options = [...new Set([...(reviewListOptions[key] || []), ...selected])];
+  const evidenceByItem = evidence && typeof evidence === "object" && !Array.isArray(evidence) ? evidence : {};
+  return `<section class="review-field-group review-list-group">
+    <h3>${escapeHtml(label)}</h3>
+    <div class="review-list-items">
+      ${options.map((item) => {
+        const lines = reviewEvidenceLines(evidenceByItem[item]);
+        return `<section class="review-list-item">
+          <label class="review-item-toggle">
+            <input type="checkbox" data-review-list-item="${escapeHtml(key)}" value="${escapeHtml(item)}" ${selected.includes(item) ? "checked" : ""}>
+            <span>${escapeHtml(item)}</span>
+          </label>
+          <label class="review-evidence-label">Evidence for ${escapeHtml(item)}
+            <textarea class="review-evidence" data-review-item-evidence="${escapeHtml(key)}" data-review-item="${escapeHtml(item)}" placeholder="No evidence for this item.">${escapeHtml(lines.join("\n"))}</textarea>
+          </label>
+        </section>`;
+      }).join("")}
+    </div>
+  </section>`;
+}
+
+function normalizeReviewMetadata(metadata) {
+  metadata.metadataEvidence = metadata.metadataEvidence || {};
+  reviewFieldDefinitions.forEach(([key, _label, type]) => {
+    if (type !== "status") {
+      return;
+    }
+    const evidence = reviewEvidenceLines(metadata.metadataEvidence[key]);
+    if ((metadata[key] === "yes" || metadata[key] === "no") && !evidence.length) {
+      metadata[key] = "unclear";
+    } else if (metadata[key] === "mentioned") {
+      metadata[key] = evidence.length ? "yes" : "unclear";
+    } else if (!metadata[key]) {
+      metadata[key] = "unclear";
+    }
+  });
+}
+
+function reviewEvidenceLines(evidence) {
+  if (!evidence) {
+    return [];
+  }
+  if (Array.isArray(evidence)) {
+    return evidence.map(String).filter(Boolean);
+  }
+  if (typeof evidence === "object") {
+    return Object.values(evidence).flatMap((value) => reviewEvidenceLines(value));
+  }
+  return [String(evidence)].filter(Boolean);
+}
+
+function clearReview() {
+  pendingReview = null;
+  reviewFields.innerHTML = "";
+  reviewPolicy.textContent = "";
+  reviewTab.hidden = true;
+  showView("create", { skipLoad: true });
+}
+
+async function completeRegistration(result) {
+  renderProcessingResult(result);
+  if (policyForm.rawFile.files.length) {
+    const transfer = new DataTransfer();
+    transfer.items.add(policyForm.rawFile.files[0]);
+    verifyForm.rawFile.files = transfer.files;
+  }
+  verifyForm.applicationName.value = result.policy.policy_name;
+  await loadRecords();
+  managedPolicySelect.value = result.policy.policy_id;
+  syncSelectedPolicy();
 }
 
 recordList.addEventListener("click", (event) => {
@@ -263,6 +501,7 @@ async function loadRecords(applicationName = "") {
         <h3>${escapeHtml(name)}</h3>
         <p>Policy ID: ${escapeHtml(policy.policy_id)}</p>
         <p>Developer: ${escapeHtml(policy.developer_name || "unknown")}</p>
+        <p>Upload method: ${escapeHtml(uploadMethodLabel(policy.upload_method))}</p>
         <p>Uploaded: ${escapeHtml(version)}</p>
         <p>Hash: ${escapeHtml(shorten(policy.hash_code))}</p>
         <p>Tx: ${escapeHtml(shorten(policy.tx_hash))}</p>
@@ -311,6 +550,7 @@ function syncSelectedPolicy() {
     `Application Name: ${name}`,
     `Policy ID: ${selected.policy_id}`,
     `Developer: ${selected.developer_name || "unknown"}`,
+    `Upload method: ${uploadMethodLabel(selected.upload_method)}`,
     `Latest Upload: ${selected.policy_version || "no upload time"}`,
     `Current Hash: ${shorten(selected.hash_code)}`,
   ].join("\n");
@@ -368,6 +608,7 @@ function renderProcessingResult(result) {
     `Policy ID: ${result.policy.policy_id}`,
     `Application Name: ${result.policy.policy_name}`,
     `Developer: ${result.policy.developer_name}`,
+    `Upload method: ${uploadMethodLabel(result.policy.upload_method)}`,
     `Uploaded: ${result.policy.policy_version}`,
     report.summary,
     `Covered: ${report.coveredTopics.join(", ") || "none"}`,
@@ -408,6 +649,10 @@ function shorten(value) {
     return "";
   }
   return value.length > 22 ? `${value.slice(0, 12)}...${value.slice(-8)}` : value;
+}
+
+function uploadMethodLabel(method) {
+  return { fast: "Fast Upload", ai: "AI Upload", manual: "Manual Upload" }[method] || method || "Fast Upload";
 }
 
 function findOnChainRecord(policy) {
@@ -482,7 +727,7 @@ function renderPolicyDetailHtml(policy, onChain, data) {
       <div class="policy-detail-header">
         <div>
           <h3>${escapeHtml(displayPolicyName(policy))}</h3>
-          <p>${escapeHtml(policy.developer_name || "unknown")} · ${escapeHtml(policy.policy_version || "no upload time")}</p>
+          <p>${escapeHtml(policy.developer_name || "unknown")} · ${escapeHtml(policy.policy_version || "no upload time")} · ${escapeHtml(uploadMethodLabel(policy.upload_method))}</p>
         </div>
         <div class="record-key">${escapeHtml(shorten(onChain ? onChain.recordKey || "" : "")) || "no record key"}</div>
       </div>
