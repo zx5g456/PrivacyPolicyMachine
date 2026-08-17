@@ -322,7 +322,11 @@ class AppHandler(BaseHTTPRequestHandler):
         if duplicate:
             self._duplicate_hash_response(duplicate, hash_code)
             return raw_file, {}, hash_code
-        metadata = extract_metadata(raw_file, "pending-review", None)
+        metadata = (
+            extract_metadata(raw_file, "pending-review", None)
+            if upload_method == "manual"
+            else self._empty_ai_metadata(raw_file)
+        )
         metadata.update(
             {
                 "applicationName": application_name,
@@ -348,6 +352,64 @@ class AppHandler(BaseHTTPRequestHandler):
                 }
             )
         return raw_file, metadata, hash_code
+
+    def _empty_ai_metadata(self, raw_file: str) -> dict[str, Any]:
+        """Create an unclassified draft that contains no keyword-rule results."""
+        list_fields = (
+            "data_type_tags",
+            "data_source_types",
+            "collection_context",
+            "processing_purpose",
+            "third_party_sources",
+            "downstream_stakeholders",
+            "third_party_purpose",
+            "regulatory_framework",
+            "risk_flags",
+        )
+        status_fields = (
+            "sharing_condition",
+            "consent_required",
+            "opt_out_available",
+            "deletion_available",
+            "request_channel",
+            "retention_policy",
+            "encryption_applied",
+            "anonymisation",
+            "cross_border_transfer",
+            "child_data_involved",
+            "contact_channel",
+        )
+        metadata: dict[str, Any] = {
+            "policyId": "pending-review",
+            "policyVersion": None,
+            "policy_version": None,
+            "permitted_usage": [],
+            "characterCount": len(raw_file),
+            "wordCount": len(raw_file.split()),
+            "sectionCount": 0,
+            "sections": [],
+            "keywordHits": {
+                "personal_data": [],
+                "sharing": [],
+                "retention": [],
+                "rights": [],
+                "security": [],
+            },
+            "metadataEvidence": {},
+            "metadataAssessment": {},
+        }
+        for field_name in list_fields:
+            metadata[field_name] = []
+            metadata["metadataEvidence"][field_name] = {}
+            metadata["metadataAssessment"][field_name] = {}
+        for field_name in status_fields:
+            metadata[field_name] = "unclear"
+            metadata["metadataEvidence"][field_name] = []
+            metadata["metadataAssessment"][field_name] = {
+                "confidence": 0.0,
+                "review_status": "needs_review",
+            }
+        return metadata
 
     def _verify_policy(self, payload: dict[str, Any]) -> None:
         application_name = self._application_name(payload)

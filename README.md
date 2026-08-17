@@ -92,7 +92,7 @@ The server generates:
 
 ### `POST /api/analyze`
 
-Run local Ollama analysis and return a review draft. Nothing is persisted. The response uses `uploadMethod=ai` and `requiresReview=true`.
+Run local Ollama analysis without keyword-rule extraction and return a review draft. Nothing is persisted. The response uses `uploadMethod=ai` and `requiresReview=true`.
 
 ### `POST /api/policies/manual`
 
