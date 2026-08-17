@@ -486,12 +486,18 @@ class AppHandler(BaseHTTPRequestHandler):
             retries=int(os.environ.get("OLLAMA_RETRIES", "2")),
         )
         analysis = processor.analyze(raw_policy)
-        for field_name in (
-            "sharing_condition",
-            "retention_policy",
-            "cross_border_transfer",
-            "child_data_involved",
-        ):
+        list_fields = (
+            "data_type_tags", "data_source_types", "collection_context",
+            "processing_purpose", "third_party_sources", "downstream_stakeholders",
+            "third_party_purpose", "regulatory_framework",
+        )
+        status_fields = (
+            "sharing_condition", "consent_required", "opt_out_available",
+            "deletion_available", "request_channel", "retention_policy",
+            "encryption_applied", "anonymisation", "cross_border_transfer",
+            "child_data_involved", "contact_channel",
+        )
+        for field_name in (*list_fields, *status_fields):
             field = getattr(analysis.fields, field_name)
             metadata[field_name] = field.value
             metadata["metadataEvidence"][field_name] = field.evidence
@@ -501,9 +507,28 @@ class AppHandler(BaseHTTPRequestHandler):
                     {
                         "value": field.value,
                         "review_status": "needs_review" if field.needs_review else "auto_extracted",
-                        "confidence": 0.5,
+                        "confidence": 0.5 if field.needs_review else 0.8,
                     }
                 )
+            elif field_name in list_fields:
+                metadata["metadataAssessment"][field_name] = {
+                    value: {
+                        "confidence": 0.5 if field.needs_review else 0.8,
+                        "review_status": "needs_review" if field.needs_review else "auto_extracted",
+                    }
+                    for value in field.value
+                }
+        metadata["permitted_usage"] = list(metadata["processing_purpose"])
+        risk_flags = []
+        if metadata["retention_policy"] == "unclear":
+            risk_flags.append("unclear_retention")
+        if metadata["downstream_stakeholders"] and metadata["sharing_condition"] == "unclear":
+            risk_flags.append("vague_third_party_sharing")
+        if metadata["deletion_available"] != "yes":
+            risk_flags.append("no_deletion_method")
+        if any(tag in metadata["data_type_tags"] for tag in ("location", "voice_recording", "eye_tracking", "payment_info")):
+            risk_flags.append("sensitive_data_involved")
+        metadata["risk_flags"] = risk_flags
         self._json(
             {
                 "analysis": analysis.model_dump(),

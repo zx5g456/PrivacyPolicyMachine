@@ -38,15 +38,41 @@ class ExtractedField(BaseModel):
     needs_review: bool = False
 
 
-class PolicyChunkExtraction(BaseModel):
-    """The four fields requested from every policy chunk."""
+class ExtractedListField(BaseModel):
+    """One multi-value policy finding produced by the model."""
 
     model_config = ConfigDict(extra="forbid")
 
+    value: list[str] = Field(default_factory=list)
+    evidence: dict[str, list[str]] = Field(default_factory=dict)
+    details: str = Field(default="")
+    needs_review: bool = False
+
+
+class PolicyChunkExtraction(BaseModel):
+    """All reviewable metadata requested from every policy chunk."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    data_type_tags: ExtractedListField
+    data_source_types: ExtractedListField
+    collection_context: ExtractedListField
+    processing_purpose: ExtractedListField
+    third_party_sources: ExtractedListField
+    downstream_stakeholders: ExtractedListField
+    third_party_purpose: ExtractedListField
+    regulatory_framework: ExtractedListField
     sharing_condition: ExtractedField
+    consent_required: ExtractedField
+    opt_out_available: ExtractedField
+    deletion_available: ExtractedField
+    request_channel: ExtractedField
     retention_policy: ExtractedField
+    encryption_applied: ExtractedField
+    anonymisation: ExtractedField
     cross_border_transfer: ExtractedField
     child_data_involved: ExtractedField
+    contact_channel: ExtractedField
 
 
 class PolicyAnalysis(BaseModel):

@@ -15,21 +15,14 @@ OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 DEFAULT_TIMEOUT_SECONDS = 90.0
 DEFAULT_RETRIES = 2
 
-SYSTEM_PROMPT = """You extract facts from privacy policies.
+SYSTEM_PROMPT = """You extract structured facts from privacy policies.
 Use only the supplied text; never use outside knowledge or make assumptions.
-For every field, value must be yes, no, or unclear.
-- sharing_condition: yes when sharing conditions or recipients are disclosed;
-  no only when sharing is explicitly denied; otherwise unclear.
-- retention_policy: yes when a retention period or deletion criterion is
-  disclosed; no only when the policy explicitly says data is not retained;
-  otherwise unclear.
-- cross_border_transfer: yes when international transfer, processing, or
-  storage is disclosed; no when explicitly denied; otherwise unclear.
-- child_data_involved: yes when children's data is collected or processed; no
-  when the service excludes children or explicitly does not collect their data;
-  otherwise unclear.
-Evidence must be copied exactly and contiguously from the supplied text.
-Return an empty evidence list for unclear fields.  Do not add extra fields.
+For list fields, select only values allowed by the JSON schema/context and put
+exact supporting quotations under the matching value in evidence. Use [] and
+{} when nothing is disclosed. For status fields, value must be yes, no, or
+unclear. "No" requires an explicit denial; absence is always unclear.
+Evidence must be copied exactly and contiguously from the supplied text. Return
+an empty evidence list for unclear status fields. Do not add extra fields.
 """
 
 
@@ -56,7 +49,7 @@ class OllamaChatClient:
             "format": schema,
             "stream": False,
             "think": False,
-            "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 1024},
+            "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 4096},
         }
         http_request = request.Request(
             self.url,

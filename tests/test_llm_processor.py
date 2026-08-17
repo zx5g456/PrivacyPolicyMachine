@@ -14,35 +14,36 @@ from server.llm_processor import (
 
 
 def extraction_json(**overrides):
-    """Create a complete four-field response for fake model clients."""
-    fields = {
-        "sharing_condition": {
+    """Create a complete all-field response for fake model clients."""
+    list_field = {"value": [], "evidence": {}, "details": "", "needs_review": False}
+    status_field = {
             "value": "unclear",
             "evidence": [],
             "details": "",
             "needs_review": True,
-        },
-        "retention_policy": {
-            "value": "unclear",
-            "evidence": [],
-            "details": "",
-            "needs_review": True,
-        },
-        "cross_border_transfer": {
-            "value": "unclear",
-            "evidence": [],
-            "details": "",
-            "needs_review": True,
-        },
-        "child_data_involved": {
-            "value": "unclear",
-            "evidence": [],
-            "details": "",
-            "needs_review": True,
-        },
     }
-    fields.update(overrides)
+    fields = {
+        **{name: dict(list_field) for name in (
+            "data_type_tags", "data_source_types", "collection_context",
+            "processing_purpose", "third_party_sources", "downstream_stakeholders",
+            "third_party_purpose", "regulatory_framework",
+        )},
+        **{name: dict(status_field) for name in (
+            "sharing_condition", "consent_required", "opt_out_available",
+            "deletion_available", "request_channel", "retention_policy",
+            "encryption_applied", "anonymisation", "cross_border_transfer",
+            "child_data_involved", "contact_channel",
+        )},
+    }
+    fields.update({
+        name: value.model_dump() if hasattr(value, "model_dump") else value
+        for name, value in overrides.items()
+    })
     return json.dumps(fields)
+
+
+def extraction_model(**overrides):
+    return PolicyChunkExtraction.model_validate_json(extraction_json(**overrides))
 
 
 class FakeClient:
@@ -71,9 +72,30 @@ class ChunkingTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_list_field_keeps_supported_values_with_verbatim_evidence(self):
+        source = "We collect precise geolocation to provide the service."
+        extraction = extraction_model(
+            data_type_tags={
+                "value": ["location", "invented_type"],
+                "evidence": {
+                    "location": [source],
+                    "invented_type": [source],
+                },
+                "details": "Location data is collected.",
+                "needs_review": False,
+            }
+        )
+
+        validated, errors = validate_evidence(extraction, source, chunk_index=0)
+
+        self.assertEqual(validated.data_type_tags.value, ["location"])
+        self.assertEqual(validated.data_type_tags.evidence["location"], [source])
+        self.assertTrue(validated.data_type_tags.needs_review)
+        self.assertIn("unsupported value", errors[0])
+
     def test_invalid_evidence_is_removed_and_claim_is_downgraded(self):
         source = "We do not sell personal information."
-        extraction = PolicyChunkExtraction(
+        extraction = extraction_model(
             sharing_condition=ExtractedField(
                 value="no",
                 evidence=["We never sell personal information."],
@@ -92,7 +114,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_exact_but_irrelevant_evidence_is_rejected(self):
         source = "We make virtual reality games and applications."
-        extraction = PolicyChunkExtraction(
+        extraction = extraction_model(
             sharing_condition=ExtractedField(value="unclear"),
             retention_policy=ExtractedField(value="unclear"),
             cross_border_transfer=ExtractedField(value="unclear"),
@@ -107,7 +129,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_negative_claim_requires_an_explicit_denial(self):
         source = "You can request to have uploaded content deleted at any time."
-        extraction = PolicyChunkExtraction(
+        extraction = extraction_model(
             sharing_condition=ExtractedField(value="unclear"),
             retention_policy=ExtractedField(value="no", evidence=[source]),
             cross_border_transfer=ExtractedField(value="unclear"),

@@ -17,6 +17,7 @@ from .llm_client import (
 )
 from .llm_models import (
     ExtractedField,
+    ExtractedListField,
     LLMConnectionError,
     LLMProcessorError,
     LLMResponseError,
@@ -25,6 +26,7 @@ from .llm_models import (
     PolicyChunk,
     PolicyChunkExtraction,
 )
+from .processor import METADATA_RULES
 
 
 DEFAULT_CHUNK_CHARS = 6_000
@@ -32,6 +34,8 @@ DEFAULT_OVERLAP_CHARS = 400
 
 
 FIELD_NAMES = tuple(PolicyChunkExtraction.model_fields)
+LIST_FIELD_NAMES = tuple(METADATA_RULES)
+STATUS_FIELD_NAMES = tuple(name for name in FIELD_NAMES if name not in LIST_FIELD_NAMES)
 
 # These terms are not used to perform the extraction.  They are a conservative
 # guardrail: a quote about an unrelated topic cannot support a model claim just
@@ -41,6 +45,13 @@ EVIDENCE_TERMS = {
     "retention_policy": ("retain", "retention", "store", "storage", "delete", "erase", "保存", "保留", "存储", "删除"),
     "cross_border_transfer": ("international", "cross-border", "country", "countries", "overseas", "transfer", "跨境", "境外", "国家", "传输"),
     "child_data_involved": ("child", "children", "minor", "under 13", "under 16", "age", "儿童", "未成年人", "年龄"),
+    "consent_required": ("consent", "agree", "permission", "opt in", "同意", "许可"),
+    "opt_out_available": ("opt out", "unsubscribe", "withdraw", "disable", "退出", "撤回", "取消订阅"),
+    "deletion_available": ("delete", "deletion", "erase", "erasure", "remove", "删除", "清除"),
+    "request_channel": ("contact", "email", "request", "form", "联系", "邮箱", "申请"),
+    "encryption_applied": ("encrypt", "encryption", "加密"),
+    "anonymisation": ("anonymous", "anonymized", "anonymised", "de-identified", "aggregate", "匿名", "去标识"),
+    "contact_channel": ("contact", "email", "phone", "address", "联系", "邮箱", "电话", "地址"),
 }
 
 EXPLICIT_NO_PATTERNS = {
@@ -48,6 +59,13 @@ EXPLICIT_NO_PATTERNS = {
     "retention_policy": ("do not retain", "does not retain", "not retained", "do not store", "not stored", "不保留", "不会保留", "不存储", "不会存储"),
     "cross_border_transfer": ("do not transfer", "not transferred", "no international", "not outside", "不跨境", "不会跨境", "不传输至境外"),
     "child_data_involved": ("not intended for children", "do not collect from children", "does not collect from children", "no children", "exclude children", "不面向儿童", "不收集儿童", "不涉及儿童", "不面向未成年人"),
+    "consent_required": ("without consent", "consent is not required", "无需同意", "不需要同意"),
+    "opt_out_available": ("cannot opt out", "no opt out", "无法退出", "不能退出"),
+    "deletion_available": ("cannot delete", "do not delete", "no right to deletion", "无法删除", "不能删除"),
+    "request_channel": ("cannot submit", "no request channel", "无法申请", "没有申请渠道"),
+    "encryption_applied": ("not encrypted", "do not encrypt", "未加密", "不加密"),
+    "anonymisation": ("not anonymized", "not anonymised", "do not anonymize", "未匿名", "不匿名"),
+    "contact_channel": ("cannot contact", "no contact", "无法联系", "没有联系方式"),
 }
 
 
@@ -114,10 +132,38 @@ def validate_evidence(
 ) -> tuple[PolicyChunkExtraction, list[str]]:
     """Remove fabricated/altered quotations and downgrade unsupported claims."""
 
-    cleaned: dict[str, ExtractedField] = {}
+    cleaned: dict[str, ExtractedField | ExtractedListField] = {}
     errors: list[str] = []
     for field_name in FIELD_NAMES:
         field = getattr(extraction, field_name)
+        if field_name in LIST_FIELD_NAMES:
+            allowed_values = METADATA_RULES[field_name]
+            valid_values: list[str] = []
+            valid_evidence_by_value: dict[str, list[str]] = {}
+            for value in field.value:
+                quotes = field.evidence.get(value, [])
+                if value not in allowed_values:
+                    errors.append(f"chunk {chunk_index} {field_name}: unsupported value: {value!r}")
+                    continue
+                valid_quotes = []
+                for quote in quotes:
+                    if not quote or quote not in source_text:
+                        errors.append(f"chunk {chunk_index} {field_name}.{value}: evidence not found verbatim: {quote!r}")
+                    else:
+                        valid_quotes.append(quote)
+                if valid_quotes:
+                    valid_values.append(value)
+                    valid_evidence_by_value[value] = list(dict.fromkeys(valid_quotes))
+                else:
+                    errors.append(f"chunk {chunk_index} {field_name}.{value}: no valid evidence")
+            cleaned[field_name] = field.model_copy(
+                update={
+                    "value": valid_values,
+                    "evidence": valid_evidence_by_value,
+                    "needs_review": field.needs_review or len(valid_values) != len(field.value),
+                }
+            )
+            continue
         valid_evidence: list[str] = []
         for quote in field.evidence:
             if not quote or quote not in source_text:
@@ -227,8 +273,13 @@ class PolicyLLMProcessor:
         )
 
     def _analyze_chunk(self, chunk: PolicyChunk) -> PolicyChunkExtraction:
+        allowed = "\n".join(
+            f"- {name}: {', '.join(values)}"
+            for name, values in METADATA_RULES.items()
+        )
         prompt = (
-            f"Analyze policy chunk {chunk.index + 1}. Return the required JSON only.\n\n"
+            f"Analyze policy chunk {chunk.index + 1}. Return the required JSON only.\n"
+            f"Allowed values for list fields:\n{allowed}\n\n"
             f"<policy_chunk>\n{chunk.text}\n</policy_chunk>"
         )
         last_error: LLMProcessorError | None = None
@@ -262,9 +313,31 @@ def _merge_extractions(
 ) -> PolicyChunkExtraction:
     """Merge overlapping chunk results and expose cross-chunk contradictions."""
 
-    merged: dict[str, ExtractedField] = {}
+    merged: dict[str, ExtractedField | ExtractedListField] = {}
     for field_name in FIELD_NAMES:
         fields = [getattr(item, field_name) for item in extractions]
+        if field_name in LIST_FIELD_NAMES:
+            values: list[str] = []
+            evidence: dict[str, list[str]] = {}
+            details: list[str] = []
+            for field in fields:
+                for value in field.value:
+                    if value not in values:
+                        values.append(value)
+                    evidence.setdefault(value, [])
+                    evidence[value].extend(
+                        quote for quote in field.evidence.get(value, [])
+                        if quote not in evidence[value]
+                    )
+                if field.details and field.details not in details:
+                    details.append(field.details)
+            merged[field_name] = ExtractedListField(
+                value=values,
+                evidence=evidence,
+                details=" ".join(details),
+                needs_review=incomplete or any(field.needs_review for field in fields),
+            )
+            continue
         supported_values = {field.value for field in fields if field.value != "unclear"}
         conflict = len(supported_values) > 1
         value = "unclear" if conflict or not supported_values else next(iter(supported_values))
