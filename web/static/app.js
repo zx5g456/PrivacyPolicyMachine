@@ -714,6 +714,10 @@ function metadataFallback(policy) {
     previousRecordKey: "",
     previousPolicyVersion: "",
     hasPreviousReference: false,
+    documentHash: "",
+    metadataHash: "",
+    registrant: "",
+    registeredAt: "",
   };
 }
 
@@ -790,6 +794,13 @@ function metadataGroups(data) {
       ["Policy URL", data.policyUrl, ""],
       ["Effective Date", data.effectiveDate, ""],
       ["Policy Version", data.policyVersion, ""],
+    ]],
+    ["On-chain Audit", [
+      ["Document Hash", data.documentHash, ""],
+      ["Metadata Hash", data.metadataHash, ""],
+      ["Registrant", data.registrant, ""],
+      ["Registered At", data.registeredAt, ""],
+      ["Previous Record", data.previousRecordKey, ""],
     ]],
     ["Data Collection", [
       ["Data Types", data.dataTypeTags, "data_type_tags"],

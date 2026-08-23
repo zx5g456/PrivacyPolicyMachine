@@ -1,0 +1,16 @@
+{
+  "name": "privacy-policy-machine-contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/start-local.js",
+    "chain": "hardhat node",
+    "contract:compile": "hardhat compile",
+    "contract:deploy": "node scripts/deploy-contract.js"
+  },
+  "devDependencies": {
+    "ethers": "^6.16.0",
+    "hardhat": "^3.0.0"
+  }
+}

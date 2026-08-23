@@ -1,0 +1,14 @@
+{
+  "name": "privacy-policy-offchain-listener",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Listen for on-chain privacy policy registrations and trigger off-chain work.",
+  "type": "module",
+  "scripts": {
+    "start": "node listener.js",
+    "check": "node --check listener.js"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0"
+  }
+}

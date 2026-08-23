@@ -24,14 +24,21 @@ class PolicyStore:
         metadata: dict[str, Any],
         report: dict[str, Any],
         tx_hash: str,
+        metadata_hash: str = "",
+        record_key: str = "",
+        block_number: int | None = None,
+        block_hash: str = "",
+        contract_address: str = "",
+        chain_id: int | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute(
                 """
                 insert into policies (
                     policy_id, policy_name, policy_version, developer_name, raw_file, hash_code, upload_method,
-                    metadata_json, report_json, tx_hash
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    metadata_json, report_json, tx_hash, metadata_hash, record_key, block_number,
+                    block_hash, contract_address, chain_id
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     policy_id,
@@ -44,6 +51,12 @@ class PolicyStore:
                     json.dumps(metadata, ensure_ascii=False),
                     json.dumps(report, ensure_ascii=False),
                     tx_hash,
+                    metadata_hash,
+                    record_key,
+                    block_number,
+                    block_hash,
+                    contract_address,
+                    chain_id,
                 ),
             )
             conn.commit()
@@ -145,6 +158,12 @@ class PolicyStore:
                     metadata_json text not null,
                     report_json text not null,
                     tx_hash text not null,
+                    metadata_hash text not null default '',
+                    record_key text not null default '',
+                    block_number integer,
+                    block_hash text not null default '',
+                    contract_address text not null default '',
+                    chain_id integer,
                     created_at text not null default current_timestamp
                 )
                 """
@@ -159,6 +178,17 @@ class PolicyStore:
                 conn.execute("alter table policies add column developer_name text not null default ''")
             if "upload_method" not in columns:
                 conn.execute("alter table policies add column upload_method text not null default 'fast'")
+            migrations = {
+                "metadata_hash": "text not null default ''",
+                "record_key": "text not null default ''",
+                "block_number": "integer",
+                "block_hash": "text not null default ''",
+                "contract_address": "text not null default ''",
+                "chain_id": "integer",
+            }
+            for name, definition in migrations.items():
+                if name not in columns:
+                    conn.execute(f"alter table policies add column {name} {definition}")
             conn.execute("create index if not exists idx_policies_policy_id on policies(policy_id)")
             conn.execute("create index if not exists idx_policies_hash_code on policies(hash_code)")
             conn.execute("create index if not exists idx_policies_policy_name on policies(policy_name)")

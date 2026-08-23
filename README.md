@@ -1,12 +1,12 @@
 # Privacy Policy Machine
 
-A runnable prototype for registering, querying, updating, and verifying privacy policies with a small web UI, SQLite storage, and a local append-only blockchain ledger.
+A runnable prototype for registering, querying, updating, and verifying privacy policies with a small web UI, SQLite storage, and a deployed Solidity registry.
 
 ## Features
 
 - Create a policy by entering an application name and uploading a policy file.
 - Automatically use the upload time as the policy version.
-- Store policy metadata, analysis results, raw policy text, off-chain hash values, SQL records, and local chain transaction data.
+- Put the complete raw policy bytes and canonical metadata JSON in transaction calldata, while storing their hashes and core identity fields in contract storage.
 - Query policies by application name and view the full policy text.
 - Verify a policy by entering the application name and uploading a file or pasting policy text.
 - Switch between prototype developers in the top bar.
@@ -25,18 +25,64 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - `server/llm_models.py`: local LLM result models and domain errors.
 - `server/llm_client.py`: Ollama client, prompt, and connection configuration.
 - `server/llm_processor.py`: policy chunking, evidence validation, retries, and result aggregation.
-- `server/blockchain.py`: local append-only ledger that mirrors an on-chain registration flow.
-- `contracts/TrustedPolicyRegistry.sol`: Solidity contract sketch for a real on-chain deployment.
+- `server/blockchain.py`: Web3 client that sends transactions to and reads records from the deployed contract.
+- `contracts/TrustedPolicyRegistry.sol`: Solidity policy registry used by the web application.
+- `scripts/deploy-contract.js`: deploys the registry to the configured RPC network.
+- `offchain-listener/listener.js`: listens for successful on-chain policy registrations and starts off-chain work.
 - `data/policies.db`: local SQLite database.
-- `data/chain.json`: local chain ledger.
 
-## Run
+## Run locally
 
-From the project root:
+Install and compile once:
 
 ```bash
-python3 -m server.app
+npm install
+npm run contract:compile
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
+
+After that, the normal startup command is:
+
+```bash
+npm run dev
+```
+
+This single command compiles the contract, starts a fresh Hardhat chain,
+deploys the contract, passes its RPC URL and address to the event listener and
+Python web server, and starts both services. Press `Ctrl+C` once to stop all of
+them.
+
+The manual multi-terminal sequence below is only needed when debugging an
+individual component.
+
+Then use three terminals. Hardhat is the real local EVM used by the web app;
+restarting it clears the local chain and requires another deployment.
+
+Terminal 1 — start the chain:
+
+```bash
+npm run chain
+```
+
+Terminal 2 — deploy, then copy the values printed by this command:
+
+```bash
+npm run contract:deploy
+```
+
+Terminal 3 — export those values and start the web server:
+
+```bash
+export RPC_URL=http://127.0.0.1:8545
+export CONTRACT_ADDRESS=0xAddressPrintedByDeploy
+export CONTRACT_DEPLOYMENT_BLOCK=1
+.venv/bin/python -m server.app
+```
+
+Every create, reviewed registration, and update submitted in the web UI now
+sends a transaction to this deployed Solidity contract before its SQL row is
+saved. Keep the chain running while using the application.
 
 The server tries `http://127.0.0.1:8000` first. If port `8000` is already in use, it automatically chooses the next available port and prints the URL, for example:
 
@@ -49,7 +95,7 @@ Open the printed URL in your browser.
 You can also force a port:
 
 ```bash
-PORT=8002 python3 -m server.app
+PORT=8002 .venv/bin/python -m server.app
 ```
 
 ## UI Workflow
@@ -88,7 +134,7 @@ The server generates:
 - `policyId`: UUID used only by the off-chain database/API.
 - `policyVersion`: upload time.
 - `hashCode`: SHA-256 hash of the policy text, used only off-chain for duplicate detection and reporting.
-- local chain transaction and block data.
+- EVM transaction and block data returned by the deployed Solidity contract.
 
 ### `POST /api/analyze`
 
@@ -132,7 +178,7 @@ Example:
 
 ### `GET /api/policies/{policyId}`
 
-Read the latest stored policy for a policy ID together with the matching local chain record.
+Read the latest stored policy for a policy ID together with the matching Solidity contract record.
 
 ### `POST /api/policies/update`
 
@@ -158,8 +204,9 @@ Required multipart fields:
 Verification compares:
 
 - submitted policy text against the latest SQL record after normalizing case, whitespace, and punctuation.
-- SQL policy text against the local chain `rawFile` after the same normalization.
-- publisher, service name, and upload-time version against the local chain record.
+- SQL and recovered-calldata policy hashes against the contract's `documentHash`.
+- SQL and recovered canonical metadata hashes against the contract's `metadataHash`.
+- publisher, service name, and upload-time version against the contract record.
 
 ### `POST /api/analyze`
 
@@ -198,44 +245,109 @@ curl http://127.0.0.1:8000/api/analyze \
 
 ```text
 TrustedPolicyRecord
-- rawFile: string
-- identity:
-  - publisherEntity: string required
-  - policyUrl: string optional
-  - serviceName: string optional
-  - effectiveDate: string optional
-  - policyVersion: string
-- dataCollection:
-  - dataTypeTags
-  - dataSourceTypes
-  - collectionContext
-  - processingPurpose
-  - permittedUsage
-- dataSharing:
-  - thirdPartySources
-  - downstreamStakeholders
-  - thirdPartyPurpose
-  - sharingCondition
-- userRights:
-  - consentRequired
-  - optOutAvailable
-  - deletionAvailable
-  - requestChannel
-- retentionSecurity:
-  - retentionPolicy
-  - encryptionApplied
-  - anonymisation
-- compliance:
-  - regulatoryFramework
-  - crossBorderTransfer
-  - childDataInvolved
-- accountability:
-  - changeSummary
-  - contactChannel
-  - riskFlags
+- documentHash: bytes32 (SHA-256 of the exact raw file bytes)
+- metadataHash: bytes32 (SHA-256 of canonical metadata JSON)
+- publisherEntity: string
+- serviceName: string
+- policyVersion: string
+- effectiveDate: string
+- registrant: address
+- registeredAt: uint64
 - previousRecordKey: bytes32
-- previousPolicyVersion: string
 - hasPreviousReference: bool
 ```
 
-`policyId` and `documentHash/hashCode` stay off-chain. They are useful for local database identity, duplicate detection, and reports, but they are not part of the public on-chain record.
+The complete raw file and metadata JSON are included in the successful registration transaction's calldata but are not copied into contract storage. The contract computes and permanently stores both hashes. The API's UUID `policyId` remains off-chain.
+
+## Independent calldata audit
+
+An auditor needs the chain RPC URL, contract address, transaction hash, and matching contract ABI. The audit verifies the receipt, destination contract, called function, sender, event, storage record, both content hashes, and version identity without trusting SQLite:
+
+```bash
+.venv/bin/python scripts/audit-registration.py \
+  0xTransactionHash \
+  --rpc-url http://127.0.0.1:8545 \
+  --contract-address 0xContractAddress \
+  --output-dir recovered-audit
+```
+
+The optional output directory receives the exact `raw-file.bin` bytes and canonical `metadata.json` recovered from transaction calldata. The same summary is available while the server is running:
+
+```text
+GET /api/audit/{txHash}
+```
+
+Calldata is public. Do not register secrets or personal information that should not be publicly recoverable. A restarted `npm run dev` creates a new ephemeral Hardhat chain, so durable third-party audit requires a persistent network.
+
+## Off-chain Event Listener (Experimental)
+
+Every successful `registerTrustedPolicyRecord` transaction emits the contract's
+`TrustedPolicyRecordRegistered` event. Its indexed `recordKey` is the unique
+on-chain ID for that policy version; this is the `policyId` printed by the
+experimental listener. The UUID called `policyId` by the local API remains an
+off-chain-only identifier.
+
+Install and run the listener after deploying `TrustedPolicyRegistry.sol`:
+
+```bash
+cd offchain-listener
+npm install
+RPC_URL=http://127.0.0.1:8545 \
+CONTRACT_ADDRESS=0xYourDeployedContractAddress \
+npm start
+```
+
+When a policy is registered, the listener currently prints the UTC detection
+time and ID:
+
+```text
+[2026-08-17T02:30:45.123Z] policyId=0x...
+```
+
+Replace the body of `callOffchainTool` in `listener.js` with the real tool call
+when the tool is available. The listener uses provider polling, so both local
+and hosted HTTP JSON-RPC endpoints work.
+
+### Complete web-to-contract event test
+
+Install the root contract dependencies and compile once:
+
+```bash
+npm install
+npm run contract:compile
+```
+
+Use four terminals. Keep the chain, listener, and web server running.
+
+Terminal 1 — start the local Hardhat chain:
+
+```bash
+npm run chain
+```
+
+Terminal 2 — deploy the contract, copy the three `export` lines it prints, then
+start the listener with those variables:
+
+```bash
+npm run contract:deploy
+export RPC_URL=http://127.0.0.1:8545
+export CONTRACT_ADDRESS=0xAddressPrintedByDeploy
+export CONTRACT_DEPLOYMENT_BLOCK=1
+cd offchain-listener
+npm start
+```
+
+Terminal 3 — use the same three exported values and start the web server:
+
+```bash
+export RPC_URL=http://127.0.0.1:8545
+export CONTRACT_ADDRESS=0xAddressPrintedByDeploy
+export CONTRACT_DEPLOYMENT_BLOCK=1
+.venv/bin/python -m server.app
+```
+
+Terminal 4 — open the URL printed by the server and create or update a policy.
+The API response includes its real transaction and block data. At the same time,
+Terminal 2 prints the event detection time and the same on-chain policy ID.
+Restarting the Hardhat node creates a fresh chain, so deploy the contract again
+and use its new address after every restart.

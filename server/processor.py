@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from typing import Any
@@ -118,6 +119,19 @@ COMPLEX_CLAUSE_MARKERS = {
 
 def hash_policy(raw_file: str) -> str:
     return hashlib.sha256(raw_file.encode("utf-8")).hexdigest()
+
+
+def hash_policy_bytes(raw_file: bytes) -> str:
+    return hashlib.sha256(raw_file).hexdigest()
+
+
+def canonical_metadata_bytes(metadata: dict) -> bytes:
+    return json.dumps(
+        metadata,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def normalize_policy_text(raw_file: str) -> str:

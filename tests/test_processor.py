@@ -5,8 +5,22 @@ from server.processor import (
     _confidence_for_evidence,
     _is_complex_sentence,
     _keyword_is_negated,
+    canonical_metadata_bytes,
     extract_metadata,
+    hash_policy_bytes,
 )
+
+
+class AuditHashTests(unittest.TestCase):
+    def test_metadata_serialization_is_canonical(self):
+        first = {"b": 2, "a": "内容"}
+        second = {"a": "内容", "b": 2}
+
+        self.assertEqual(canonical_metadata_bytes(first), canonical_metadata_bytes(second))
+        self.assertEqual(
+            hash_policy_bytes(canonical_metadata_bytes(first)),
+            hash_policy_bytes(canonical_metadata_bytes(second)),
+        )
 
 
 class NegationDetectionTests(unittest.TestCase):

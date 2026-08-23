@@ -36,6 +36,9 @@ class UploadMethodStorageTests(unittest.TestCase):
             store = PolicyStore(db_path)
 
             self.assertEqual(store.get_latest("old")["upload_method"], "fast")
+            migrated = store.get_latest("old")
+            self.assertEqual(migrated["metadata_hash"], "")
+            self.assertEqual(migrated["record_key"], "")
 
     def test_upload_method_is_saved_and_returned(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -52,9 +55,17 @@ class UploadMethodStorageTests(unittest.TestCase):
                 metadata={},
                 report={},
                 tx_hash="tx",
+                metadata_hash="metadata-hash",
+                record_key="record-key",
+                block_number=7,
+                block_hash="block-hash",
+                contract_address="0xcontract",
+                chain_id=31337,
             )
 
             self.assertEqual(policy["upload_method"], "manual")
+            self.assertEqual(policy["metadata_hash"], "metadata-hash")
+            self.assertEqual(policy["block_number"], 7)
 
 
 if __name__ == "__main__":

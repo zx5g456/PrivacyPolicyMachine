@@ -25,7 +25,14 @@ from .llm_models import (
     LLMTimeoutError,
 )
 from .llm_processor import PolicyLLMProcessor
-from .processor import extract_metadata, generate_report, hash_policy, normalize_policy_text
+from .processor import (
+    canonical_metadata_bytes,
+    extract_metadata,
+    generate_report,
+    hash_policy,
+    hash_policy_bytes,
+    normalize_policy_text,
+)
 from .storage import PolicyStore
 
 
@@ -33,7 +40,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 STATIC_DIR = ROOT / "web" / "static"
 store = PolicyStore(DATA_DIR / "policies.db")
-registry = TrustedPolicyRegistry(DATA_DIR / "chain.json")
+registry = TrustedPolicyRegistry(
+    ROOT / "artifacts" / "contracts" / "TrustedPolicyRegistry.sol" / "TrustedPolicyRegistry.json"
+)
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -64,6 +73,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._json({"policy": policy, "onChain": self._chain_to_dict(chain_record)})
             elif parsed.path == "/api/chain":
                 self._json({"records": [self._chain_to_dict(item) for item in registry.list_records()]})
+            elif parsed.path.startswith("/api/audit/"):
+                tx_hash = unquote(parsed.path.removeprefix("/api/audit/"))
+                self._json(registry.audit_registration(tx_hash))
             else:
                 self._static(parsed.path)
         except Exception as exc:
@@ -101,11 +113,12 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _create_policy(self, payload: dict[str, Any]) -> None:
         raw_file = self._raw_file(payload, required=True)
+        raw_bytes = self._raw_file_bytes(payload, raw_file)
         policy_id = str(uuid.uuid4())
         application_name = self._application_name(payload)
         developer_name = self._developer_name(payload)
         policy_version = self._upload_time()
-        hash_code = hash_policy(raw_file)
+        hash_code = hash_policy_bytes(raw_bytes)
         duplicate = store.get_by_hash(hash_code)
         if duplicate:
             self._duplicate_hash_response(duplicate, hash_code)
@@ -116,6 +129,7 @@ class AppHandler(BaseHTTPRequestHandler):
             policy_version=policy_version,
             developer_name=developer_name,
             raw_file=raw_file,
+            raw_bytes=raw_bytes,
             hash_code=hash_code,
             policy_url=self._optional_payload(payload, "policyUrl"),
             effective_date=self._optional_payload(payload, "effectiveDate"),
@@ -138,6 +152,7 @@ class AppHandler(BaseHTTPRequestHandler):
         developer_name = self._developer_name(payload)
         policy_version = self._upload_time()
         raw_file = self._raw_file(payload, required=True)
+        raw_bytes = self._raw_file_bytes(payload, raw_file)
         existing = store.get_latest(policy_id)
         if not existing:
             self._json({"error": "Policy ID not found. Create the policy first."}, HTTPStatus.NOT_FOUND)
@@ -145,7 +160,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if existing.get("developer_name", "").lower() != developer_name.lower():
             self._json({"error": "Only the developer who uploaded this application policy can update it."}, HTTPStatus.FORBIDDEN)
             return
-        hash_code = hash_policy(raw_file)
+        hash_code = hash_policy_bytes(raw_bytes)
         duplicate = store.get_by_hash(hash_code)
         if duplicate:
             self._duplicate_hash_response(duplicate, hash_code)
@@ -156,6 +171,7 @@ class AppHandler(BaseHTTPRequestHandler):
             policy_version=policy_version,
             developer_name=developer_name,
             raw_file=raw_file,
+            raw_bytes=raw_bytes,
             hash_code=hash_code,
             policy_url=self._optional_payload(payload, "policyUrl"),
             effective_date=self._optional_payload(payload, "effectiveDate"),
@@ -180,6 +196,7 @@ class AppHandler(BaseHTTPRequestHandler):
         policy_version: str,
         developer_name: str,
         raw_file: str,
+        raw_bytes: bytes,
         hash_code: str,
         policy_url: str,
         effective_date: str,
@@ -201,10 +218,16 @@ class AppHandler(BaseHTTPRequestHandler):
         metadata["change_summary"] = change_summary
         metadata["upload_method"] = upload_method
         metadata["permitted_usage"] = metadata.get("processing_purpose", [])
+        metadata_bytes = canonical_metadata_bytes(metadata)
+        metadata_hash = hash_policy_bytes(metadata_bytes)
         report = generate_report(metadata, hash_code)
         chain_record = registry.register_trusted_policy_record(
-            self._on_chain_data(raw_file, metadata)
+            self._on_chain_data(raw_bytes, metadata_bytes, metadata)
         )
+        if chain_record.data.documentHash != "0x" + hash_code:
+            raise RuntimeError("Contract document hash does not match the uploaded file")
+        if chain_record.data.metadataHash != "0x" + metadata_hash:
+            raise RuntimeError("Contract metadata hash does not match the canonical metadata")
         policy = store.create_policy(
             policy_id=policy_id,
             policy_name=policy_name,
@@ -212,10 +235,16 @@ class AppHandler(BaseHTTPRequestHandler):
             developer_name=developer_name,
             raw_file=raw_file,
             hash_code=hash_code,
+            metadata_hash=metadata_hash,
             upload_method=upload_method,
             metadata=metadata,
             report=report,
             tx_hash=chain_record.txHash,
+            record_key=chain_record.recordKey,
+            block_number=chain_record.blockNumber,
+            block_hash=chain_record.blockHash,
+            contract_address=chain_record.contractAddress,
+            chain_id=chain_record.chainId,
         )
         return policy, metadata, report, chain_record
 
@@ -226,6 +255,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def _register_reviewed_policy(self, payload: dict[str, Any]) -> None:
         """Persist metadata approved or edited on the review page."""
         raw_file = self._raw_file(payload, required=True)
+        raw_bytes = self._raw_file_bytes(payload, raw_file)
         upload_method = self._required(payload, "uploadMethod")
         if upload_method not in {"ai", "manual"}:
             raise ValueError("uploadMethod must be ai or manual for reviewed registration")
@@ -241,7 +271,7 @@ class AppHandler(BaseHTTPRequestHandler):
         policy_version = self._upload_time()
         application_name = self._application_name(payload)
         developer_name = self._developer_name(payload)
-        hash_code = hash_policy(raw_file)
+        hash_code = hash_policy_bytes(raw_bytes)
         duplicate = store.get_by_hash(hash_code)
         if duplicate:
             self._duplicate_hash_response(duplicate, hash_code)
@@ -252,6 +282,7 @@ class AppHandler(BaseHTTPRequestHandler):
             policy_version=policy_version,
             developer_name=developer_name,
             raw_file=raw_file,
+            raw_bytes=raw_bytes,
             hash_code=hash_code,
             policy_url=self._optional_payload(payload, "policyUrl"),
             effective_date=self._optional_payload(payload, "effectiveDate"),
@@ -413,8 +444,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _verify_policy(self, payload: dict[str, Any]) -> None:
         application_name = self._application_name(payload)
-        submitted_raw = self._submitted_policy(payload)
-        submitted_hash = hash_policy(submitted_raw)
+        submitted_bytes, submitted_raw = self._submitted_policy_data(payload)
+        submitted_hash = hash_policy_bytes(submitted_bytes)
         stored = store.get_latest_by_application_name(application_name)
         if not stored:
             self._json(
@@ -447,13 +478,25 @@ class AppHandler(BaseHTTPRequestHandler):
         expected_hash = stored["hash_code"]
         normalized_submitted = normalize_policy_text(submitted_raw)
         normalized_stored = normalize_policy_text(stored["raw_file"])
-        normalized_chain = normalize_policy_text(chain_record.data.rawFile)
+        stored_metadata_hash = hash_policy_bytes(canonical_metadata_bytes(stored["metadata"]))
+        audit = registry.audit_registration(stored["tx_hash"])
         comparisons = {
             "submittedTextMatchesSql": normalized_submitted == normalized_stored,
-            "sqlTextMatchesChain": normalized_stored == normalized_chain,
+            "submittedHashMatchesSql": submitted_hash == expected_hash,
+            "sqlDocumentHashMatchesChain": "0x" + expected_hash == chain_record.data.documentHash,
+            "sqlMetadataHashMatchesChain": "0x" + stored_metadata_hash == chain_record.data.metadataHash,
+            "storedMetadataHashMatchesSql": stored.get("metadata_hash", "") == stored_metadata_hash,
+            "calldataDocumentHashMatchesChain": audit["checks"]["documentHashMatchesStorage"],
+            "calldataMetadataHashMatchesChain": audit["checks"]["metadataHashMatchesStorage"],
+            "transactionSucceeded": audit["checks"]["transactionSucceeded"],
+            "transactionTargetsContract": audit["checks"]["transactionTargetsContract"],
             "publisherMatches": stored["developer_name"] == chain_record.data.publisherEntity,
             "serviceNameMatches": stored["policy_name"] == chain_record.data.serviceName,
             "versionMatches": stored["policy_version"] == chain_record.data.policyVersion,
+            "txHashMatches": stored["tx_hash"] == chain_record.txHash,
+            "recordKeyMatches": stored.get("record_key", "") == chain_record.recordKey,
+            "contractAddressMatches": stored.get("contract_address", "").lower() == chain_record.contractAddress.lower(),
+            "chainIdMatches": stored.get("chain_id") == chain_record.chainId,
         }
         verified = all(comparisons.values())
         self._json(
@@ -463,6 +506,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "submittedHash": submitted_hash,
                 "sqlHash": expected_hash,
                 "exactHashesMatch": submitted_hash == expected_hash,
+                "audit": audit,
                 "normalization": "case, whitespace, and punctuation ignored",
                 "stored": stored,
                 "onChain": self._chain_to_dict(chain_record),
@@ -558,36 +602,19 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return data
 
-    def _on_chain_data(self, raw_file: str, metadata: dict[str, Any]) -> OnChainData:
+    def _on_chain_data(
+        self,
+        raw_file: bytes,
+        metadata_json: bytes,
+        metadata: dict[str, Any],
+    ) -> OnChainData:
         return OnChainData(
             rawFile=raw_file,
+            metadataJson=metadata_json,
             policyVersion=self._metadata_text(metadata, "policy_version"),
             publisherEntity=self._metadata_text(metadata, "publisher_entity"),
-            policyUrl=self._metadata_text(metadata, "policy_url"),
             serviceName=self._metadata_text(metadata, "service_name"),
             effectiveDate=self._metadata_text(metadata, "effective_date"),
-            dataTypeTags=self._metadata_text(metadata, "data_type_tags"),
-            dataSourceTypes=self._metadata_text(metadata, "data_source_types"),
-            collectionContext=self._metadata_text(metadata, "collection_context"),
-            processingPurpose=self._metadata_text(metadata, "processing_purpose"),
-            permittedUsage=self._metadata_text(metadata, "permitted_usage"),
-            thirdPartySources=self._metadata_text(metadata, "third_party_sources"),
-            downstreamStakeholders=self._metadata_text(metadata, "downstream_stakeholders"),
-            thirdPartyPurpose=self._metadata_text(metadata, "third_party_purpose"),
-            sharingCondition=self._metadata_text(metadata, "sharing_condition"),
-            consentRequired=self._metadata_text(metadata, "consent_required"),
-            optOutAvailable=self._metadata_text(metadata, "opt_out_available"),
-            deletionAvailable=self._metadata_text(metadata, "deletion_available"),
-            requestChannel=self._metadata_text(metadata, "request_channel"),
-            retentionPolicy=self._metadata_text(metadata, "retention_policy"),
-            encryptionApplied=self._metadata_text(metadata, "encryption_applied"),
-            anonymisation=self._metadata_text(metadata, "anonymisation"),
-            regulatoryFramework=self._metadata_text(metadata, "regulatory_framework"),
-            crossBorderTransfer=self._metadata_text(metadata, "cross_border_transfer"),
-            childDataInvolved=self._metadata_text(metadata, "child_data_involved"),
-            changeSummary=self._metadata_text(metadata, "change_summary"),
-            contactChannel=self._metadata_text(metadata, "contact_channel"),
-            riskFlags=self._metadata_text(metadata, "risk_flags"),
         )
 
     def _metadata_text(self, metadata: dict[str, Any], key: str) -> str:
@@ -613,6 +640,7 @@ class AppHandler(BaseHTTPRequestHandler):
             content = part.get_payload(decode=True) or b""
             if filename and content:
                 payload[name] = content.decode("utf-8", errors="replace")
+                payload[f"{name}Bytes"] = content
                 payload[f"{name}Name"] = filename
             elif not filename:
                 payload[name] = content.decode(part.get_content_charset() or "utf-8", errors="replace")
@@ -643,14 +671,22 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValueError("rawFile file upload is required")
         return None
 
-    def _submitted_policy(self, payload: dict[str, Any]) -> str:
+    def _raw_file_bytes(self, payload: dict[str, Any], raw_file: str) -> bytes:
+        value = payload.get("rawFileBytes")
+        return bytes(value) if isinstance(value, bytes) else raw_file.encode("utf-8")
+
+    def _submitted_policy_data(self, payload: dict[str, Any]) -> tuple[bytes, str]:
         raw_file = self._raw_file(payload, required=False)
         if raw_file:
-            return raw_file
+            return self._raw_file_bytes(payload, raw_file), raw_file
         raw_text = payload.get("rawText")
         if isinstance(raw_text, str) and raw_text.strip():
-            return raw_text.strip()
+            text = raw_text.strip()
+            return text.encode("utf-8"), text
         raise ValueError("Upload a policy file or enter policy text to verify")
+
+    def _submitted_policy(self, payload: dict[str, Any]) -> str:
+        return self._submitted_policy_data(payload)[1]
 
     def _application_name(self, payload: dict[str, Any]) -> str:
         application_name = payload.get("applicationName") or payload.get("policyName")
