@@ -8,6 +8,7 @@ from server.processor import (
     canonical_metadata_bytes,
     extract_metadata,
     hash_policy_bytes,
+    require_canonical_metadata_keys,
 )
 
 
@@ -21,6 +22,15 @@ class AuditHashTests(unittest.TestCase):
             hash_policy_bytes(canonical_metadata_bytes(first)),
             hash_policy_bytes(canonical_metadata_bytes(second)),
         )
+
+    def test_snake_case_metadata_keys_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "retention_policy"):
+            require_canonical_metadata_keys(
+                {
+                    "policyVersion": "2026-08-30T10:00:00",
+                    "metadataDetails": {"retention_policy": "Seven years."},
+                }
+            )
 
 
 class NegationDetectionTests(unittest.TestCase):
@@ -40,10 +50,27 @@ class NegationDetectionTests(unittest.TestCase):
     def test_negated_yes_no_field_is_no_and_requires_review(self):
         metadata = extract_metadata("We do not encrypt personal data.", "policy-1", None)
 
-        self.assertEqual(metadata["encryption_applied"], "no")
-        assessment = metadata["metadataAssessment"]["encryption_applied"]
+        self.assertEqual(metadata["encryptionApplied"], "no")
+        assessment = metadata["metadataAssessment"]["encryptionApplied"]
         self.assertEqual(assessment["confidence"], 0.5)
-        self.assertEqual(assessment["review_status"], REVIEW_NEEDS_REVIEW)
+        self.assertEqual(assessment["reviewStatus"], REVIEW_NEEDS_REVIEW)
+
+    def test_metadata_uses_camel_case_and_keeps_independent_details(self):
+        policy = (
+            "We personalize the service and use account data for marketing. "
+            "We encrypt personal data in transit with TLS 1.2 and at rest with AES-256."
+        )
+
+        metadata = extract_metadata(policy, "policy-1", "2026-08-30T10:00:00")
+
+        self.assertEqual(metadata["policyVersion"], "2026-08-30T10:00:00")
+        self.assertIn("personalization", metadata["permittedUsage"])
+        self.assertIn("marketing", metadata["permittedUsage"])
+        self.assertNotEqual(metadata["permittedUsage"], metadata["processingPurpose"])
+        self.assertIn("TLS 1.2", metadata["metadataDetails"]["encryptionApplied"])
+        self.assertIn("reviewStatus", metadata["metadataAssessment"]["encryptionApplied"])
+        self.assertNotIn("policy_version", metadata)
+        self.assertNotIn("permitted_usage", metadata)
 
 
 class ConfidenceTests(unittest.TestCase):

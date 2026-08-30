@@ -8,7 +8,7 @@ from typing import Any
 
 
 KEYWORD_RULES = {
-    "personal_data": ["personal information", "personal data", "name", "email", "address"],
+    "personalData": ["personal information", "personal data", "name", "email", "address"],
     "sharing": ["share", "third party", "partner", "affiliate", "vendor"],
     "retention": ["retain", "retention", "delete", "deletion", "storage period"],
     "rights": ["access", "correct", "erase", "opt out", "withdraw consent"],
@@ -16,7 +16,7 @@ KEYWORD_RULES = {
 }
 
 METADATA_RULES = {
-    "data_type_tags": {
+    "dataTypeTags": {
         "location": ["location", "gps", "geolocation"],
         "voice_recording": ["voice", "audio", "recording", "microphone"],
         "eye_tracking": ["eye tracking", "gaze"],
@@ -24,49 +24,82 @@ METADATA_RULES = {
         "payment_info": ["payment", "credit card", "billing"],
         "contact_info": ["email", "phone", "address"],
     },
-    "data_source_types": {
+    "dataSourceTypes": {
         "user_provided": ["provide", "submit", "enter", "account"],
         "device_sensor": ["sensor", "device", "camera", "microphone"],
         "third_party_login": ["google login", "facebook login", "single sign-on", "third party login"],
         "cookies": ["cookie", "tracking technology"],
         "xr_headset_sensor": ["xr headset", "vr headset", "ar headset", "headset"],
     },
-    "collection_context": {
+    "collectionContext": {
         "during_payment": ["payment", "purchase", "billing"],
         "account_registration": ["register", "sign up", "create an account"],
         "service_usage": ["use our service", "use the app", "interact"],
         "customer_support": ["support", "contact us"],
     },
-    "processing_purpose": {
+    "processingPurpose": {
         "advertising": ["advertising", "ads", "marketing"],
         "analytics": ["analytics", "measure", "improve"],
         "payment_processing": ["payment processing", "process payment", "billing"],
         "service_provision": ["provide", "operate", "deliver"],
         "security": ["security", "fraud", "protect"],
     },
-    "third_party_sources": {
+    "permittedUsage": {
+        "service_operation": ["service operation", "operate", "provide services"],
+        "personalization": ["personalize", "personalise", "personalization", "tailor", "customize"],
+        "marketing": ["marketing", "promotional", "promotion"],
+        "product_improvement": ["product improvement", "improve our service", "improve our product", "develop"],
+    },
+    "thirdPartySources": {
         "google_login": ["google login", "google account"],
         "facebook_login": ["facebook login", "facebook account"],
         "payment_processor": ["payment processor", "stripe", "paypal"],
     },
-    "downstream_stakeholders": {
+    "downstreamStakeholders": {
         "cloud_provider": ["cloud provider", "hosting provider", "aws", "azure", "google cloud"],
         "analytics_provider": ["analytics provider", "google analytics"],
         "advertising_partner": ["advertising partner", "ad network"],
         "payment_processor": ["payment processor", "stripe", "paypal"],
+        "email_provider": ["email provider", "email delivery", "sendgrid", "mailgun"],
     },
-    "third_party_purpose": {
+    "thirdPartyPurpose": {
         "payment_processing": ["payment processing", "process payment"],
         "analytics": ["analytics", "measure"],
         "advertising": ["advertising", "ads"],
         "service_delivery": ["provide services", "service provider"],
+        "authentication": ["authentication", "authenticate", "single sign-on", "login"],
+        "email_delivery": ["email delivery", "deliver email", "send email"],
     },
-    "regulatory_framework": {
+    "regulatoryFramework": {
         "GDPR": ["gdpr", "general data protection regulation"],
         "CCPA": ["ccpa", "california consumer privacy act"],
         "COPPA": ["coppa", "children's online privacy protection"],
         "HIPAA": ["hipaa"],
     },
+}
+
+LIST_METADATA_FIELDS = tuple(METADATA_RULES)
+STATUS_METADATA_FIELDS = (
+    "sharingCondition",
+    "consentRequired",
+    "optOutAvailable",
+    "deletionAvailable",
+    "requestChannel",
+    "retentionPolicy",
+    "encryptionApplied",
+    "anonymisation",
+    "crossBorderTransfer",
+    "childDataInvolved",
+    "contactChannel",
+)
+REVIEWABLE_METADATA_FIELDS = LIST_METADATA_FIELDS + STATUS_METADATA_FIELDS
+
+RISK_FLAG_DETAILS = {
+    "unclear_retention": "The policy does not state a clear retention period.",
+    "vague_third_party_sharing": "Third-party sharing is described without clear conditions.",
+    "no_deletion_method": "The policy does not provide a supported deletion method.",
+    "sensitive_data_involved": "The policy covers sensitive data that requires additional safeguards.",
+    "review_recommended": "Human review is recommended before trusted registration.",
 }
 
 # Review status is generated automatically for now. A future manual review UI can
@@ -126,12 +159,35 @@ def hash_policy_bytes(raw_file: bytes) -> str:
 
 
 def canonical_metadata_bytes(metadata: dict) -> bytes:
+    require_canonical_metadata_keys(metadata)
     return json.dumps(
         metadata,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def require_canonical_metadata_keys(metadata: dict[str, Any]) -> None:
+    """Reject snake_case field names in canonical metadata containers."""
+    containers = {
+        "metadata": metadata,
+        "metadataEvidence": metadata.get("metadataEvidence"),
+        "metadataDetails": metadata.get("metadataDetails"),
+        "metadataAssessment": metadata.get("metadataAssessment"),
+        "keywordHits": metadata.get("keywordHits"),
+    }
+    invalid = [
+        f"{container_name}.{key}"
+        for container_name, container in containers.items()
+        if isinstance(container, dict)
+        for key in container
+        if "_" in key
+    ]
+    if invalid:
+        raise ValueError(
+            "metadata keys must use camelCase; invalid keys: " + ", ".join(sorted(invalid))
+        )
 
 
 def normalize_policy_text(raw_file: str) -> str:
@@ -265,7 +321,7 @@ def _review_status(confidence: float, value: Any, force_review: bool = False) ->
 def _assessment_entry(confidence: float, value: Any, force_review: bool = False) -> dict[str, Any]:
     return {
         "confidence": confidence,
-        "review_status": _review_status(confidence, value, force_review),
+        "reviewStatus": _review_status(confidence, value, force_review),
     }
 
 
@@ -286,28 +342,47 @@ def _metadata_assessment(
         assessment[field] = field_assessment
 
     evidence_keywords = {
-        "sharing_condition": ["share when", "we may share", "with your consent", "as required by law"],
-        "consent_required": ["consent", "agree", "permission", "opt in"],
-        "opt_out_available": ["opt out", "unsubscribe", "disable", "withdraw"],
-        "deletion_available": ["delete your data", "delete your account", "erasure", "remove your data"],
-        "request_channel": ["contact us", "email us", "privacy request", "request form"],
-        "retention_policy": KEYWORD_RULES["retention"],
-        "encryption_applied": ["encrypt", "encryption"],
+        "sharingCondition": ["share when", "we may share", "with your consent", "as required by law"],
+        "consentRequired": ["consent", "agree", "permission", "opt in"],
+        "optOutAvailable": ["opt out", "unsubscribe", "disable", "withdraw"],
+        "deletionAvailable": ["delete your data", "delete your account", "erasure", "remove your data"],
+        "requestChannel": ["contact us", "email us", "privacy request", "request form"],
+        "retentionPolicy": KEYWORD_RULES["retention"],
+        "encryptionApplied": ["encrypt", "encryption"],
         "anonymisation": ["anonymous", "anonymized", "anonymised", "de-identified", "aggregate"],
-        "cross_border_transfer": ["international", "cross-border", "outside your country", "other countries"],
-        "child_data_involved": ["child", "children", "under 13", "minor"],
-        "contact_channel": ["contact us", "email", "privacy@"],
+        "crossBorderTransfer": ["international", "cross-border", "outside your country", "other countries"],
+        "childDataInvolved": ["child", "children", "under 13", "minor"],
+        "contactChannel": ["contact us", "email", "privacy@"],
     }
     for field, value in field_values.items():
         evidence = metadata_evidence.get(field, [])
         confidence = _confidence_for_evidence(evidence, evidence_keywords.get(field, []), value)
         assessment[field] = _assessment_entry(confidence, value)
 
-    assessment["risk_flags"] = {
+    assessment["riskFlags"] = {
         flag: _assessment_entry(0.8, flag, force_review=True)
         for flag in risk_flags
     }
     return assessment
+
+
+def _evidence_lines(evidence: Any) -> list[str]:
+    if isinstance(evidence, str):
+        return [evidence] if evidence.strip() else []
+    if isinstance(evidence, list):
+        return [str(item) for item in evidence if str(item).strip()]
+    if isinstance(evidence, dict):
+        return [line for value in evidence.values() for line in _evidence_lines(value)]
+    return []
+
+
+def _metadata_details(metadata_evidence: dict[str, Any], risk_flags: list[str]) -> dict[str, str]:
+    details = {
+        field: " ".join(dict.fromkeys(_evidence_lines(metadata_evidence.get(field))))
+        for field in REVIEWABLE_METADATA_FIELDS
+    }
+    details["riskFlags"] = " ".join(RISK_FLAG_DETAILS[flag] for flag in risk_flags)
+    return details
 
 
 def _yes_no_unclear(lower: str, positive: list[str], negative: list[str] | None = None) -> str:
@@ -352,81 +427,83 @@ def extract_metadata(raw_file: str, policy_id: str, policy_version: str | None) 
     anonymisation = _yes_no_unclear(lower, ["anonymous", "anonymized", "anonymised", "de-identified", "aggregate"])
     cross_border_transfer = _yes_no_unclear(lower, ["international", "cross-border", "outside your country", "other countries"])
     child_data_involved = _yes_no_unclear(lower, ["child", "children", "under 13", "minor"])
-    retention_policy = "mentioned" if keyword_hits["retention"] else "unclear"
-    sharing_condition = "mentioned" if any(term in lower for term in ["share when", "we may share", "with your consent", "as required by law"]) else "unclear"
-    request_channel = "mentioned" if any(term in lower for term in ["contact us", "email us", "privacy request", "request form"]) else "unclear"
-    contact_channel = "mentioned" if any(term in lower for term in ["contact us", "email", "privacy@"]) else "unclear"
+    retention_policy = "yes" if keyword_hits["retention"] else "unclear"
+    sharing_condition = "yes" if any(term in lower for term in ["share when", "we may share", "with your consent", "as required by law"]) else "unclear"
+    request_channel = "yes" if any(term in lower for term in ["contact us", "email us", "privacy request", "request form"]) else "unclear"
+    contact_channel = "yes" if any(term in lower for term in ["contact us", "email", "privacy@"]) else "unclear"
     metadata_evidence.update(
         _field_evidence(
             raw_file,
             {
-                "sharing_condition": ["share when", "we may share", "with your consent", "as required by law"],
-                "consent_required": ["consent", "agree", "permission", "opt in"],
-                "opt_out_available": ["opt out", "unsubscribe", "disable", "withdraw"],
-                "deletion_available": ["delete your data", "delete your account", "erasure", "remove your data"],
-                "request_channel": ["contact us", "email us", "privacy request", "request form"],
-                "retention_policy": KEYWORD_RULES["retention"],
-                "encryption_applied": ["encrypt", "encryption"],
+                "sharingCondition": ["share when", "we may share", "with your consent", "as required by law"],
+                "consentRequired": ["consent", "agree", "permission", "opt in"],
+                "optOutAvailable": ["opt out", "unsubscribe", "disable", "withdraw"],
+                "deletionAvailable": ["delete your data", "delete your account", "erasure", "remove your data"],
+                "requestChannel": ["contact us", "email us", "privacy request", "request form"],
+                "retentionPolicy": KEYWORD_RULES["retention"],
+                "encryptionApplied": ["encrypt", "encryption"],
                 "anonymisation": ["anonymous", "anonymized", "anonymised", "de-identified", "aggregate"],
-                "cross_border_transfer": ["international", "cross-border", "outside your country", "other countries"],
-                "child_data_involved": ["child", "children", "under 13", "minor"],
-                "contact_channel": ["contact us", "email", "privacy@"],
+                "crossBorderTransfer": ["international", "cross-border", "outside your country", "other countries"],
+                "childDataInvolved": ["child", "children", "under 13", "minor"],
+                "contactChannel": ["contact us", "email", "privacy@"],
             },
         )
     )
     risk_flags = []
     if retention_policy == "unclear":
         risk_flags.append("unclear_retention")
-    if metadata["downstream_stakeholders"] and sharing_condition == "unclear":
+    if metadata["downstreamStakeholders"] and sharing_condition == "unclear":
         risk_flags.append("vague_third_party_sharing")
     if deletion_available != "yes":
         risk_flags.append("no_deletion_method")
-    if any(tag in metadata["data_type_tags"] for tag in ["location", "voice_recording", "eye_tracking", "payment_info"]):
+    if any(tag in metadata["dataTypeTags"] for tag in ["location", "voice_recording", "eye_tracking", "payment_info"]):
         risk_flags.append("sensitive_data_involved")
+    if risk_flags:
+        risk_flags.append("review_recommended")
     field_values = {
-        "sharing_condition": sharing_condition,
-        "consent_required": consent_required,
-        "opt_out_available": opt_out_available,
-        "deletion_available": deletion_available,
-        "request_channel": request_channel,
-        "retention_policy": retention_policy,
-        "encryption_applied": encryption_applied,
+        "sharingCondition": sharing_condition,
+        "consentRequired": consent_required,
+        "optOutAvailable": opt_out_available,
+        "deletionAvailable": deletion_available,
+        "requestChannel": request_channel,
+        "retentionPolicy": retention_policy,
+        "encryptionApplied": encryption_applied,
         "anonymisation": anonymisation,
-        "cross_border_transfer": cross_border_transfer,
-        "child_data_involved": child_data_involved,
-        "contact_channel": contact_channel,
+        "crossBorderTransfer": cross_border_transfer,
+        "childDataInvolved": child_data_involved,
+        "contactChannel": contact_channel,
     }
     metadata_assessment = _metadata_assessment(metadata, field_values, metadata_evidence, risk_flags)
+    metadata_details = _metadata_details(metadata_evidence, risk_flags)
     return {
         "policyId": policy_id,
         "policyVersion": policy_version,
-        "publisher_entity": "",
-        "policy_url": "",
-        "service_name": "",
-        "effective_date": "",
-        "policy_version": policy_version,
-        "document_hash": "",
+        "publisherEntity": "",
+        "policyUrl": "",
+        "serviceName": "",
+        "effectiveDate": "",
+        "documentHash": "",
         **metadata,
-        "permitted_usage": metadata["processing_purpose"],
-        "sharing_condition": sharing_condition,
-        "consent_required": consent_required,
-        "opt_out_available": opt_out_available,
-        "deletion_available": deletion_available,
-        "request_channel": request_channel,
-        "retention_policy": retention_policy,
-        "encryption_applied": encryption_applied,
+        "sharingCondition": sharing_condition,
+        "consentRequired": consent_required,
+        "optOutAvailable": opt_out_available,
+        "deletionAvailable": deletion_available,
+        "requestChannel": request_channel,
+        "retentionPolicy": retention_policy,
+        "encryptionApplied": encryption_applied,
         "anonymisation": anonymisation,
-        "cross_border_transfer": cross_border_transfer,
-        "child_data_involved": child_data_involved,
-        "change_summary": "",
-        "contact_channel": contact_channel,
-        "risk_flags": risk_flags,
+        "crossBorderTransfer": cross_border_transfer,
+        "childDataInvolved": child_data_involved,
+        "changeSummary": "",
+        "contactChannel": contact_channel,
+        "riskFlags": risk_flags,
         "characterCount": len(raw_file),
         "wordCount": len(words),
         "sectionCount": len(sections),
         "sections": sections[:12],
         "keywordHits": keyword_hits,
         "metadataEvidence": metadata_evidence,
+        "metadataDetails": metadata_details,
         "metadataAssessment": metadata_assessment,
     }
 

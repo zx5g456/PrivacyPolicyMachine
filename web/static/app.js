@@ -38,42 +38,45 @@ let manageablePolicies = [];
 let listedPolicies = [];
 let chainRecordsByTx = new Map();
 let currentEvidence = {};
+let currentDetails = {};
 let currentAssessment = {};
 let pendingReview = null;
 
 const reviewFieldDefinitions = [
-  ["data_type_tags", "Data Types", "list"],
-  ["data_source_types", "Data Sources", "list"],
-  ["collection_context", "Collection Context", "list"],
-  ["processing_purpose", "Processing Purpose", "list"],
-  ["third_party_sources", "Third-party Sources", "list"],
-  ["downstream_stakeholders", "Downstream Stakeholders", "list"],
-  ["third_party_purpose", "Third-party Purpose", "list"],
-  ["regulatory_framework", "Regulatory Framework", "list"],
-  ["sharing_condition", "Sharing Condition", "status"],
-  ["consent_required", "Consent Required", "status"],
-  ["opt_out_available", "Opt-out Available", "status"],
-  ["deletion_available", "Deletion Available", "status"],
-  ["request_channel", "Request Channel", "status"],
-  ["retention_policy", "Retention Policy", "status"],
-  ["encryption_applied", "Encryption Applied", "status"],
+  ["dataTypeTags", "Data Types", "list"],
+  ["dataSourceTypes", "Data Sources", "list"],
+  ["collectionContext", "Collection Context", "list"],
+  ["processingPurpose", "Processing Purpose", "list"],
+  ["permittedUsage", "Permitted Usage", "list"],
+  ["thirdPartySources", "Third-party Sources", "list"],
+  ["downstreamStakeholders", "Downstream Stakeholders", "list"],
+  ["thirdPartyPurpose", "Third-party Purpose", "list"],
+  ["regulatoryFramework", "Regulatory Framework", "list"],
+  ["sharingCondition", "Sharing Condition", "status"],
+  ["consentRequired", "Consent Required", "status"],
+  ["optOutAvailable", "Opt-out Available", "status"],
+  ["deletionAvailable", "Deletion Available", "status"],
+  ["requestChannel", "Request Channel", "status"],
+  ["retentionPolicy", "Retention Policy", "status"],
+  ["encryptionApplied", "Encryption Applied", "status"],
   ["anonymisation", "Anonymisation", "status"],
-  ["cross_border_transfer", "Cross-border Transfer", "status"],
-  ["child_data_involved", "Child Data Involved", "status"],
-  ["contact_channel", "Contact Channel", "status"],
-  ["risk_flags", "Risk Flags", "list"],
+  ["crossBorderTransfer", "Cross-border Transfer", "status"],
+  ["childDataInvolved", "Child Data Involved", "status"],
+  ["contactChannel", "Contact Channel", "status"],
+  ["riskFlags", "Risk Flags", "list"],
 ];
 
 const reviewListOptions = {
-  data_type_tags: ["location", "voice_recording", "eye_tracking", "device_id", "payment_info", "contact_info"],
-  data_source_types: ["user_provided", "device_sensor", "third_party_login", "cookies", "xr_headset_sensor"],
-  collection_context: ["during_payment", "account_registration", "service_usage", "customer_support"],
-  processing_purpose: ["advertising", "analytics", "payment_processing", "service_provision", "security"],
-  third_party_sources: ["google_login", "facebook_login", "payment_processor"],
-  downstream_stakeholders: ["cloud_provider", "analytics_provider", "advertising_partner", "payment_processor"],
-  third_party_purpose: ["payment_processing", "analytics", "advertising", "service_delivery"],
-  regulatory_framework: ["GDPR", "CCPA", "COPPA", "HIPAA"],
-  risk_flags: ["unclear_retention", "vague_third_party_sharing", "no_deletion_method", "sensitive_data_involved"],
+  dataTypeTags: ["location", "voice_recording", "eye_tracking", "device_id", "payment_info", "contact_info"],
+  dataSourceTypes: ["user_provided", "device_sensor", "third_party_login", "cookies", "xr_headset_sensor"],
+  collectionContext: ["during_payment", "account_registration", "service_usage", "customer_support"],
+  processingPurpose: ["advertising", "analytics", "payment_processing", "service_provision", "security"],
+  permittedUsage: ["service_operation", "personalization", "marketing", "product_improvement"],
+  thirdPartySources: ["google_login", "facebook_login", "payment_processor"],
+  downstreamStakeholders: ["cloud_provider", "analytics_provider", "advertising_partner", "payment_processor", "email_provider"],
+  thirdPartyPurpose: ["payment_processing", "analytics", "advertising", "service_delivery", "authentication", "email_delivery"],
+  regulatoryFramework: ["GDPR", "CCPA", "COPPA", "HIPAA"],
+  riskFlags: ["unclear_retention", "vague_third_party_sharing", "no_deletion_method", "sensitive_data_involved", "review_recommended"],
 };
 
 const samplePolicy = `PRIVACY POLICY:
@@ -208,15 +211,15 @@ updateForm.addEventListener("submit", async (event) => {
     updateBox.className = "verification pass";
     updateBox.textContent = [
       result.message,
-      `Policy ID: ${result.policy.policy_id}`,
-      `Application Name: ${result.policy.policy_name}`,
-      `Developer: ${result.policy.developer_name}`,
-      `Upload method: ${uploadMethodLabel(result.policy.upload_method)}`,
-      `Uploaded: ${result.policy.policy_version}`,
-      `Hash: ${shorten(result.policy.hash_code)}`,
+      `Policy ID: ${result.policy.policyId}`,
+      `Application Name: ${result.policy.policyName}`,
+      `Developer: ${result.policy.developerName}`,
+      `Upload method: ${uploadMethodLabel(result.policy.uploadMethod)}`,
+      `Uploaded: ${result.policy.policyVersion}`,
+      `Hash: ${shorten(result.policy.hashCode)}`,
     ].join("\n");
     await loadRecords();
-    managedPolicySelect.value = result.policy.policy_id;
+    managedPolicySelect.value = result.policy.policyId;
     syncSelectedPolicy();
   } catch (error) {
     updateBox.className = "verification fail";
@@ -288,6 +291,10 @@ function openReview(result, method) {
   reviewFields.innerHTML = reviewFieldDefinitions.map(([key, label, type]) => {
     const value = pendingReview.metadata[key];
     const evidence = reviewEvidenceLines(pendingReview.metadata.metadataEvidence && pendingReview.metadata.metadataEvidence[key]);
+    const details = pendingReview.metadata.metadataDetails && pendingReview.metadata.metadataDetails[key] || "";
+    const detailsControl = `<label class="review-evidence-label">Details
+      <textarea class="review-evidence" data-review-details="${escapeHtml(key)}" placeholder="Add a concise, policy-grounded explanation.">${escapeHtml(details)}</textarea>
+    </label>`;
     const evidenceControl = `<label class="review-evidence-label">Evidence
       <textarea class="review-evidence" data-review-evidence="${escapeHtml(key)}" placeholder="No evidence. Add one exact quotation per line if available.">${escapeHtml(evidence.join("\n"))}</textarea>
     </label>`;
@@ -300,9 +307,9 @@ function openReview(result, method) {
           <select data-review-field="${escapeHtml(key)}" data-review-type="status">
             ${choices.map((choice) => `<option value="${escapeHtml(choice)}" ${String(value) === choice ? "selected" : ""}>${escapeHtml(choice)}</option>`).join("")}
           </select>
-        </label>${evidenceControl}</section>`;
+        </label>${detailsControl}${evidenceControl}</section>`;
     }
-    return renderReviewListField(key, label, value, pendingReview.metadata.metadataEvidence[key]);
+    return renderReviewListField(key, label, value, pendingReview.metadata.metadataEvidence[key], details);
   }).join("");
   reviewStatus.className = "verification";
   reviewStatus.textContent = "Review every field before registration.";
@@ -319,6 +326,10 @@ async function registerReviewedPolicy() {
     pendingReview.metadata[key] = control.value;
   });
   pendingReview.metadata.metadataEvidence = pendingReview.metadata.metadataEvidence || {};
+  pendingReview.metadata.metadataDetails = pendingReview.metadata.metadataDetails || {};
+  reviewFields.querySelectorAll("[data-review-details]").forEach((control) => {
+    pendingReview.metadata.metadataDetails[control.dataset.reviewDetails] = control.value.trim();
+  });
   reviewFields.querySelectorAll("[data-review-evidence]").forEach((control) => {
     pendingReview.metadata.metadataEvidence[control.dataset.reviewEvidence] = control.value
       .split("\n")
@@ -360,7 +371,7 @@ async function registerReviewedPolicy() {
   }
 }
 
-function renderReviewListField(key, label, value, evidence) {
+function renderReviewListField(key, label, value, evidence, details) {
   const selected = Array.isArray(value) ? value.map(String) : [];
   const options = [...new Set([...(reviewListOptions[key] || []), ...selected])];
   const evidenceByItem = evidence && typeof evidence === "object" && !Array.isArray(evidence) ? evidence : {};
@@ -380,11 +391,15 @@ function renderReviewListField(key, label, value, evidence) {
         </section>`;
       }).join("")}
     </div>
+    <label class="review-evidence-label">Details
+      <textarea class="review-evidence" data-review-details="${escapeHtml(key)}" placeholder="Add a concise, policy-grounded explanation.">${escapeHtml(details || "")}</textarea>
+    </label>
   </section>`;
 }
 
 function normalizeReviewMetadata(metadata) {
   metadata.metadataEvidence = metadata.metadataEvidence || {};
+  metadata.metadataDetails = metadata.metadataDetails || {};
   reviewFieldDefinitions.forEach(([key, _label, type]) => {
     if (type !== "status") {
       return;
@@ -428,9 +443,9 @@ async function completeRegistration(result) {
     transfer.items.add(policyForm.rawFile.files[0]);
     verifyForm.rawFile.files = transfer.files;
   }
-  verifyForm.applicationName.value = result.policy.policy_name;
+  verifyForm.applicationName.value = result.policy.policyName;
   await loadRecords();
-  managedPolicySelect.value = result.policy.policy_id;
+  managedPolicySelect.value = result.policy.policyId;
   syncSelectedPolicy();
 }
 
@@ -441,7 +456,7 @@ recordList.addEventListener("click", (event) => {
   }
   const policy = listedPolicies.find((item) => String(item.id) === button.dataset.recordId);
   if (policy) {
-    verifyForm.rawText.value = policy.raw_file;
+    verifyForm.rawText.value = policy.rawFile;
     verifyForm.rawFile.value = "";
     verifyForm.applicationName.value = displayPolicyName(policy);
     renderRecordDetail(policy);
@@ -494,18 +509,18 @@ async function loadRecords(applicationName = "") {
   renderManagedPolicies();
   recordList.innerHTML = policies
     .map((policy) => {
-      const version = policy.policy_version || "unversioned";
+      const version = policy.policyVersion || "unversioned";
       const name = displayPolicyName(policy);
       const metadata = displayMetadataForPolicy(policy);
       return `<article class="record-card">
         <h3>${escapeHtml(name)}</h3>
-        <p>Policy ID: ${escapeHtml(policy.policy_id)}</p>
-        <p>Developer: ${escapeHtml(policy.developer_name || "unknown")}</p>
-        <p>Upload method: ${escapeHtml(uploadMethodLabel(policy.upload_method))}</p>
+        <p>Policy ID: ${escapeHtml(policy.policyId)}</p>
+        <p>Developer: ${escapeHtml(policy.developerName || "unknown")}</p>
+        <p>Upload method: ${escapeHtml(uploadMethodLabel(policy.uploadMethod))}</p>
         <p>Uploaded: ${escapeHtml(version)}</p>
-        <p>Hash: ${escapeHtml(shorten(policy.hash_code))}</p>
-        <p>Tx: ${escapeHtml(shorten(policy.tx_hash))}</p>
-        <p>Created: ${escapeHtml(policy.created_at)}</p>
+        <p>Hash: ${escapeHtml(shorten(policy.hashCode))}</p>
+        <p>Tx: ${escapeHtml(shorten(policy.txHash))}</p>
+        <p>Created: ${escapeHtml(policy.createdAt)}</p>
         ${renderMetadataSummaryHtml(metadata)}
         <button
           class="record-action"
@@ -529,18 +544,18 @@ function renderManagedPolicies() {
   manageablePolicies.forEach((policy) => {
     const name = displayPolicyName(policy);
     const option = document.createElement("option");
-    option.value = policy.policy_id;
-    option.textContent = `${name} (${policy.policy_version || "no upload time"})`;
+    option.value = policy.policyId;
+    option.textContent = `${name} (${policy.policyVersion || "no upload time"})`;
     managedPolicySelect.append(option);
   });
-  if (manageablePolicies.some((policy) => policy.policy_id === currentValue)) {
+  if (manageablePolicies.some((policy) => policy.policyId === currentValue)) {
     managedPolicySelect.value = currentValue;
   }
   syncSelectedPolicy();
 }
 
 function syncSelectedPolicy() {
-  const selected = manageablePolicies.find((policy) => policy.policy_id === managedPolicySelect.value);
+  const selected = manageablePolicies.find((policy) => policy.policyId === managedPolicySelect.value);
   if (!selected) {
     selectedPolicyBox.textContent = "No policy selected.";
     return;
@@ -548,16 +563,16 @@ function syncSelectedPolicy() {
   const name = displayPolicyName(selected);
   selectedPolicyBox.textContent = [
     `Application Name: ${name}`,
-    `Policy ID: ${selected.policy_id}`,
-    `Developer: ${selected.developer_name || "unknown"}`,
-    `Upload method: ${uploadMethodLabel(selected.upload_method)}`,
-    `Latest Upload: ${selected.policy_version || "no upload time"}`,
-    `Current Hash: ${shorten(selected.hash_code)}`,
+    `Policy ID: ${selected.policyId}`,
+    `Developer: ${selected.developerName || "unknown"}`,
+    `Upload method: ${uploadMethodLabel(selected.uploadMethod)}`,
+    `Latest Upload: ${selected.policyVersion || "no upload time"}`,
+    `Current Hash: ${shorten(selected.hashCode)}`,
   ].join("\n");
 }
 
 function displayPolicyName(policy) {
-  return policy.policy_name || (policy.metadata && policy.metadata.applicationName) || policy.policy_id;
+  return policy.policyName || (policy.metadata && policy.metadata.applicationName) || policy.policyId;
 }
 
 function renderQueryFullText(policy) {
@@ -605,11 +620,11 @@ function renderProcessingResult(result) {
   storageValue.textContent = `Saved row #${result.policy.id}`;
   blockValue.textContent = `Block ${result.onChain.blockNumber}`;
   reportBox.textContent = [
-    `Policy ID: ${result.policy.policy_id}`,
-    `Application Name: ${result.policy.policy_name}`,
-    `Developer: ${result.policy.developer_name}`,
-    `Upload method: ${uploadMethodLabel(result.policy.upload_method)}`,
-    `Uploaded: ${result.policy.policy_version}`,
+    `Policy ID: ${result.policy.policyId}`,
+    `Application Name: ${result.policy.policyName}`,
+    `Developer: ${result.policy.developerName}`,
+    `Upload method: ${uploadMethodLabel(result.policy.uploadMethod)}`,
+    `Uploaded: ${result.policy.policyVersion}`,
     report.summary,
     `Covered: ${report.coveredTopics.join(", ") || "none"}`,
     `Missing: ${report.missingTopics.join(", ") || "none"}`,
@@ -629,7 +644,7 @@ function renderVerification(result) {
     result.verified ? "Verified trusted policy record." : "Verification failed.",
     result.reason,
     result.stored ? `Application Name: ${displayPolicyName(result.stored)}` : "",
-    result.stored ? `Uploaded: ${result.stored.policy_version}` : "",
+    result.stored ? `Uploaded: ${result.stored.policyVersion}` : "",
     comparisons,
     result.normalization ? `Text comparison: ${result.normalization}` : "",
     typeof result.exactHashesMatch === "boolean" ? `Exact file hash matches stored record: ${result.exactHashesMatch ? "yes" : "no"}` : "",
@@ -656,7 +671,7 @@ function uploadMethodLabel(method) {
 }
 
 function findOnChainRecord(policy) {
-  return chainRecordsByTx.get(policy.tx_hash) || null;
+  return chainRecordsByTx.get(policy.txHash) || null;
 }
 
 function displayMetadataForPolicy(policy) {
@@ -681,35 +696,36 @@ function mergeMetadata(primary, fallback) {
 function metadataFallback(policy) {
   const metadata = policy.metadata || {};
   return {
-    rawFile: policy.raw_file || "",
-    policyVersion: policy.policy_version || metadata.policy_version || metadata.policyVersion || "",
-    publisherEntity: metadata.publisher_entity || policy.developer_name || "",
-    policyUrl: metadata.policy_url || "",
-    serviceName: metadata.service_name || displayPolicyName(policy),
-    effectiveDate: metadata.effective_date || "",
-    dataTypeTags: valueText(metadata.data_type_tags),
-    dataSourceTypes: valueText(metadata.data_source_types),
-    collectionContext: valueText(metadata.collection_context),
-    processingPurpose: valueText(metadata.processing_purpose),
-    permittedUsage: valueText(metadata.permitted_usage),
-    thirdPartySources: valueText(metadata.third_party_sources),
-    downstreamStakeholders: valueText(metadata.downstream_stakeholders),
-    thirdPartyPurpose: valueText(metadata.third_party_purpose),
-    sharingCondition: valueText(metadata.sharing_condition),
-    consentRequired: valueText(metadata.consent_required),
-    optOutAvailable: valueText(metadata.opt_out_available),
-    deletionAvailable: valueText(metadata.deletion_available),
-    requestChannel: valueText(metadata.request_channel),
-    retentionPolicy: valueText(metadata.retention_policy),
-    encryptionApplied: valueText(metadata.encryption_applied),
+    rawFile: policy.rawFile || "",
+    policyVersion: policy.policyVersion || metadata.policyVersion || "",
+    publisherEntity: metadata.publisherEntity || policy.developerName || "",
+    policyUrl: metadata.policyUrl || "",
+    serviceName: metadata.serviceName || displayPolicyName(policy),
+    effectiveDate: metadata.effectiveDate || "",
+    dataTypeTags: valueText(metadata.dataTypeTags),
+    dataSourceTypes: valueText(metadata.dataSourceTypes),
+    collectionContext: valueText(metadata.collectionContext),
+    processingPurpose: valueText(metadata.processingPurpose),
+    permittedUsage: valueText(metadata.permittedUsage),
+    thirdPartySources: valueText(metadata.thirdPartySources),
+    downstreamStakeholders: valueText(metadata.downstreamStakeholders),
+    thirdPartyPurpose: valueText(metadata.thirdPartyPurpose),
+    sharingCondition: valueText(metadata.sharingCondition),
+    consentRequired: valueText(metadata.consentRequired),
+    optOutAvailable: valueText(metadata.optOutAvailable),
+    deletionAvailable: valueText(metadata.deletionAvailable),
+    requestChannel: valueText(metadata.requestChannel),
+    retentionPolicy: valueText(metadata.retentionPolicy),
+    encryptionApplied: valueText(metadata.encryptionApplied),
     anonymisation: valueText(metadata.anonymisation),
-    regulatoryFramework: valueText(metadata.regulatory_framework),
-    crossBorderTransfer: valueText(metadata.cross_border_transfer),
-    childDataInvolved: valueText(metadata.child_data_involved),
-    changeSummary: valueText(metadata.change_summary),
-    contactChannel: valueText(metadata.contact_channel),
-    riskFlags: valueText(metadata.risk_flags),
+    regulatoryFramework: valueText(metadata.regulatoryFramework),
+    crossBorderTransfer: valueText(metadata.crossBorderTransfer),
+    childDataInvolved: valueText(metadata.childDataInvolved),
+    changeSummary: valueText(metadata.changeSummary),
+    contactChannel: valueText(metadata.contactChannel),
+    riskFlags: valueText(metadata.riskFlags),
     metadataEvidence: metadata.metadataEvidence || {},
+    metadataDetails: metadata.metadataDetails || {},
     metadataAssessment: metadata.metadataAssessment || {},
     previousRecordKey: "",
     previousPolicyVersion: "",
@@ -722,16 +738,17 @@ function metadataFallback(policy) {
 }
 
 function renderPolicyDetailHtml(policy, onChain, data) {
-  const rawFile = policy.raw_file || "";
+  const rawFile = policy.rawFile || "";
   const rawPreview = rawFile.length > 900 ? `${rawFile.slice(0, 900)}...` : rawFile;
   currentEvidence = data.metadataEvidence || {};
+  currentDetails = data.metadataDetails || {};
   currentAssessment = data.metadataAssessment || {};
   return `
     <section class="policy-detail">
       <div class="policy-detail-header">
         <div>
           <h3>${escapeHtml(displayPolicyName(policy))}</h3>
-          <p>${escapeHtml(policy.developer_name || "unknown")} · ${escapeHtml(policy.policy_version || "no upload time")} · ${escapeHtml(uploadMethodLabel(policy.upload_method))}</p>
+          <p>${escapeHtml(policy.developerName || "unknown")} · ${escapeHtml(policy.policyVersion || "no upload time")} · ${escapeHtml(uploadMethodLabel(policy.uploadMethod))}</p>
         </div>
         <div class="record-key">${escapeHtml(shorten(onChain ? onChain.recordKey || "" : "")) || "no record key"}</div>
       </div>
@@ -765,6 +782,7 @@ function renderMetadataGroupHtml(title, rows) {
             <dt>${escapeHtml(label)}</dt>
             <dd>
               <span>${escapeHtml(displayValue(value))}</span>
+              ${renderDetailsHtml(evidenceKey)}
               ${renderAssessmentHtml(evidenceKey, value)}
               ${renderEvidenceHtml(evidenceKey)}
             </dd>
@@ -803,40 +821,48 @@ function metadataGroups(data) {
       ["Previous Record", data.previousRecordKey, ""],
     ]],
     ["Data Collection", [
-      ["Data Types", data.dataTypeTags, "data_type_tags"],
-      ["Data Sources", data.dataSourceTypes, "data_source_types"],
-      ["Collection Context", data.collectionContext, "collection_context"],
-      ["Processing Purpose", data.processingPurpose, "processing_purpose"],
-      ["Permitted Usage", data.permittedUsage, "processing_purpose"],
+      ["Data Types", data.dataTypeTags, "dataTypeTags"],
+      ["Data Sources", data.dataSourceTypes, "dataSourceTypes"],
+      ["Collection Context", data.collectionContext, "collectionContext"],
+      ["Processing Purpose", data.processingPurpose, "processingPurpose"],
+      ["Permitted Usage", data.permittedUsage, "permittedUsage"],
     ]],
     ["Data Sharing", [
-      ["Third-party Sources", data.thirdPartySources, "third_party_sources"],
-      ["Downstream Stakeholders", data.downstreamStakeholders, "downstream_stakeholders"],
-      ["Third-party Purpose", data.thirdPartyPurpose, "third_party_purpose"],
-      ["Sharing Condition", data.sharingCondition, "sharing_condition"],
+      ["Third-party Sources", data.thirdPartySources, "thirdPartySources"],
+      ["Downstream Stakeholders", data.downstreamStakeholders, "downstreamStakeholders"],
+      ["Third-party Purpose", data.thirdPartyPurpose, "thirdPartyPurpose"],
+      ["Sharing Condition", data.sharingCondition, "sharingCondition"],
     ]],
     ["User Rights", [
-      ["Consent Required", data.consentRequired, "consent_required"],
-      ["Opt-out Available", data.optOutAvailable, "opt_out_available"],
-      ["Deletion Available", data.deletionAvailable, "deletion_available"],
-      ["Request Channel", data.requestChannel, "request_channel"],
+      ["Consent Required", data.consentRequired, "consentRequired"],
+      ["Opt-out Available", data.optOutAvailable, "optOutAvailable"],
+      ["Deletion Available", data.deletionAvailable, "deletionAvailable"],
+      ["Request Channel", data.requestChannel, "requestChannel"],
     ]],
     ["Retention and Security", [
-      ["Retention Policy", data.retentionPolicy, "retention_policy"],
-      ["Encryption Applied", data.encryptionApplied, "encryption_applied"],
+      ["Retention Policy", data.retentionPolicy, "retentionPolicy"],
+      ["Encryption Applied", data.encryptionApplied, "encryptionApplied"],
       ["Anonymisation", data.anonymisation, "anonymisation"],
     ]],
     ["Compliance", [
-      ["Regulatory Framework", data.regulatoryFramework, "regulatory_framework"],
-      ["Cross-border Transfer", data.crossBorderTransfer, "cross_border_transfer"],
-      ["Child Data Involved", data.childDataInvolved, "child_data_involved"],
+      ["Regulatory Framework", data.regulatoryFramework, "regulatoryFramework"],
+      ["Cross-border Transfer", data.crossBorderTransfer, "crossBorderTransfer"],
+      ["Child Data Involved", data.childDataInvolved, "childDataInvolved"],
     ]],
     ["Change and Accountability", [
       ["Change Summary", data.changeSummary, ""],
-      ["Contact Channel", data.contactChannel, "contact_channel"],
-      ["Risk Flags", data.riskFlags, ""],
+      ["Contact Channel", data.contactChannel, "contactChannel"],
+      ["Risk Flags", data.riskFlags, "riskFlags"],
     ]],
   ];
+}
+
+function renderDetailsHtml(detailsKey) {
+  if (!detailsKey) {
+    return "";
+  }
+  const details = currentDetails && currentDetails[detailsKey];
+  return details ? `<p class="metadata-details">${escapeHtml(details)}</p>` : "";
 }
 
 function renderEvidenceHtml(evidenceKey) {
@@ -861,7 +887,7 @@ function renderAssessmentHtml(assessmentKey, value) {
   if (!assessment) {
     return "";
   }
-  const status = assessment.review_status || "auto_extracted";
+  const status = assessment.reviewStatus || "auto_extracted";
   const confidence = Number(assessment.confidence);
   const confidenceText = Number.isFinite(confidence) ? confidence.toFixed(2) : "n/a";
   return `<div class="assessment ${status === "needs_review" ? "needs-review" : ""}">

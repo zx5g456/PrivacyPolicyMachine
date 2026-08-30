@@ -41,31 +41,31 @@ STATUS_FIELD_NAMES = tuple(name for name in FIELD_NAMES if name not in LIST_FIEL
 # guardrail: a quote about an unrelated topic cannot support a model claim just
 # because the quote happens to exist in the source document.
 EVIDENCE_TERMS = {
-    "sharing_condition": ("share", "sharing", "third party", "disclose", "sell", "共享", "第三方", "披露", "出售"),
-    "retention_policy": ("retain", "retention", "store", "storage", "delete", "erase", "保存", "保留", "存储", "删除"),
-    "cross_border_transfer": ("international", "cross-border", "country", "countries", "overseas", "transfer", "跨境", "境外", "国家", "传输"),
-    "child_data_involved": ("child", "children", "minor", "under 13", "under 16", "age", "儿童", "未成年人", "年龄"),
-    "consent_required": ("consent", "agree", "permission", "opt in", "同意", "许可"),
-    "opt_out_available": ("opt out", "unsubscribe", "withdraw", "disable", "退出", "撤回", "取消订阅"),
-    "deletion_available": ("delete", "deletion", "erase", "erasure", "remove", "删除", "清除"),
-    "request_channel": ("contact", "email", "request", "form", "联系", "邮箱", "申请"),
-    "encryption_applied": ("encrypt", "encryption", "加密"),
+    "sharingCondition": ("share", "sharing", "third party", "disclose", "sell", "共享", "第三方", "披露", "出售"),
+    "retentionPolicy": ("retain", "retention", "store", "storage", "delete", "erase", "保存", "保留", "存储", "删除"),
+    "crossBorderTransfer": ("international", "cross-border", "country", "countries", "overseas", "transfer", "跨境", "境外", "国家", "传输"),
+    "childDataInvolved": ("child", "children", "minor", "under 13", "under 16", "age", "儿童", "未成年人", "年龄"),
+    "consentRequired": ("consent", "agree", "permission", "opt in", "同意", "许可"),
+    "optOutAvailable": ("opt out", "unsubscribe", "withdraw", "disable", "退出", "撤回", "取消订阅"),
+    "deletionAvailable": ("delete", "deletion", "erase", "erasure", "remove", "删除", "清除"),
+    "requestChannel": ("contact", "email", "request", "form", "联系", "邮箱", "申请"),
+    "encryptionApplied": ("encrypt", "encryption", "加密"),
     "anonymisation": ("anonymous", "anonymized", "anonymised", "de-identified", "aggregate", "匿名", "去标识"),
-    "contact_channel": ("contact", "email", "phone", "address", "联系", "邮箱", "电话", "地址"),
+    "contactChannel": ("contact", "email", "phone", "address", "联系", "邮箱", "电话", "地址"),
 }
 
 EXPLICIT_NO_PATTERNS = {
-    "sharing_condition": ("do not share", "does not share", "never share", "do not sell", "不会共享", "不共享", "不会出售", "不出售"),
-    "retention_policy": ("do not retain", "does not retain", "not retained", "do not store", "not stored", "不保留", "不会保留", "不存储", "不会存储"),
-    "cross_border_transfer": ("do not transfer", "not transferred", "no international", "not outside", "不跨境", "不会跨境", "不传输至境外"),
-    "child_data_involved": ("not intended for children", "do not collect from children", "does not collect from children", "no children", "exclude children", "不面向儿童", "不收集儿童", "不涉及儿童", "不面向未成年人"),
-    "consent_required": ("without consent", "consent is not required", "无需同意", "不需要同意"),
-    "opt_out_available": ("cannot opt out", "no opt out", "无法退出", "不能退出"),
-    "deletion_available": ("cannot delete", "do not delete", "no right to deletion", "无法删除", "不能删除"),
-    "request_channel": ("cannot submit", "no request channel", "无法申请", "没有申请渠道"),
-    "encryption_applied": ("not encrypted", "do not encrypt", "未加密", "不加密"),
+    "sharingCondition": ("do not share", "does not share", "never share", "do not sell", "不会共享", "不共享", "不会出售", "不出售"),
+    "retentionPolicy": ("do not retain", "does not retain", "not retained", "do not store", "not stored", "不保留", "不会保留", "不存储", "不会存储"),
+    "crossBorderTransfer": ("do not transfer", "not transferred", "no international", "not outside", "不跨境", "不会跨境", "不传输至境外"),
+    "childDataInvolved": ("not intended for children", "do not collect from children", "does not collect from children", "no children", "exclude children", "不面向儿童", "不收集儿童", "不涉及儿童", "不面向未成年人"),
+    "consentRequired": ("without consent", "consent is not required", "无需同意", "不需要同意"),
+    "optOutAvailable": ("cannot opt out", "no opt out", "无法退出", "不能退出"),
+    "deletionAvailable": ("cannot delete", "do not delete", "no right to deletion", "无法删除", "不能删除"),
+    "requestChannel": ("cannot submit", "no request channel", "无法申请", "没有申请渠道"),
+    "encryptionApplied": ("not encrypted", "do not encrypt", "未加密", "不加密"),
     "anonymisation": ("not anonymized", "not anonymised", "do not anonymize", "未匿名", "不匿名"),
-    "contact_channel": ("cannot contact", "no contact", "无法联系", "没有联系方式"),
+    "contactChannel": ("cannot contact", "no contact", "无法联系", "没有联系方式"),
 }
 
 
@@ -280,6 +280,9 @@ class PolicyLLMProcessor:
         prompt = (
             f"Analyze policy chunk {chunk.index + 1}. Return the required JSON only.\n"
             f"Allowed values for list fields:\n{allowed}\n\n"
+            "Populate details with concrete policy facts such as retention periods, request or contact "
+            "channels, encryption standards, sharing conditions, transfer safeguards, and child age "
+            "thresholds. Do not use details merely to repeat yes, no, or unclear.\n\n"
             f"<policy_chunk>\n{chunk.text}\n</policy_chunk>"
         )
         last_error: LLMProcessorError | None = None

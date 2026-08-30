@@ -26,12 +26,16 @@ from .llm_models import (
 )
 from .llm_processor import PolicyLLMProcessor
 from .processor import (
+    LIST_METADATA_FIELDS,
+    RISK_FLAG_DETAILS,
+    STATUS_METADATA_FIELDS,
     canonical_metadata_bytes,
     extract_metadata,
     generate_report,
     hash_policy,
     hash_policy_bytes,
     normalize_policy_text,
+    require_canonical_metadata_keys,
 )
 from .storage import PolicyStore
 
@@ -66,9 +70,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     self._json({"error": "Policy not found"}, HTTPStatus.NOT_FOUND)
                     return
                 chain_record = registry.read_on_chain_record(
-                    policy["developer_name"],
-                    policy["policy_name"],
-                    policy["policy_version"],
+                    policy["developerName"],
+                    policy["policyName"],
+                    policy["policyVersion"],
                 )
                 self._json({"policy": policy, "onChain": self._chain_to_dict(chain_record)})
             elif parsed.path == "/api/chain":
@@ -157,7 +161,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if not existing:
             self._json({"error": "Policy ID not found. Create the policy first."}, HTTPStatus.NOT_FOUND)
             return
-        if existing.get("developer_name", "").lower() != developer_name.lower():
+        if existing.get("developerName", "").lower() != developer_name.lower():
             self._json({"error": "Only the developer who uploaded this application policy can update it."}, HTTPStatus.FORBIDDEN)
             return
         hash_code = hash_policy_bytes(raw_bytes)
@@ -167,7 +171,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         policy, metadata, report, chain_record = self._register_policy_version(
             policy_id=policy_id,
-            policy_name=existing["policy_name"],
+            policy_name=existing["policyName"],
             policy_version=policy_version,
             developer_name=developer_name,
             raw_file=raw_file,
@@ -205,19 +209,20 @@ class AppHandler(BaseHTTPRequestHandler):
         reviewed_metadata: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any]:
         metadata = reviewed_metadata or extract_metadata(raw_file, policy_id, policy_version)
+        require_canonical_metadata_keys(metadata)
         metadata["policyId"] = policy_id
         metadata["policyVersion"] = policy_version
-        metadata["policy_version"] = policy_version
         metadata["applicationName"] = policy_name
         metadata["developer"] = developer_name
-        metadata["publisher_entity"] = developer_name
-        metadata["policy_url"] = policy_url
-        metadata["service_name"] = policy_name
-        metadata["effective_date"] = effective_date
-        metadata["document_hash"] = hash_code
-        metadata["change_summary"] = change_summary
-        metadata["upload_method"] = upload_method
-        metadata["permitted_usage"] = metadata.get("processing_purpose", [])
+        metadata["publisherEntity"] = developer_name
+        metadata["policyUrl"] = policy_url
+        metadata["serviceName"] = policy_name
+        metadata["effectiveDate"] = effective_date
+        metadata["documentHash"] = hash_code
+        metadata["changeSummary"] = change_summary
+        metadata["uploadMethod"] = upload_method
+        metadata.setdefault("permittedUsage", [])
+        metadata.setdefault("metadataDetails", {})
         metadata_bytes = canonical_metadata_bytes(metadata)
         metadata_hash = hash_policy_bytes(metadata_bytes)
         report = generate_report(metadata, hash_code)
@@ -303,24 +308,19 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _normalize_reviewed_metadata(self, metadata: dict[str, Any]) -> None:
         """Prevent unsupported yes/no findings from being registered."""
+        require_canonical_metadata_keys(metadata)
         evidence_by_field = metadata.setdefault("metadataEvidence", {})
         if not isinstance(evidence_by_field, dict):
             evidence_by_field = {}
             metadata["metadataEvidence"] = evidence_by_field
-        status_fields = {
-            "sharing_condition",
-            "consent_required",
-            "opt_out_available",
-            "deletion_available",
-            "request_channel",
-            "retention_policy",
-            "encryption_applied",
-            "anonymisation",
-            "cross_border_transfer",
-            "child_data_involved",
-            "contact_channel",
-        }
-        for field_name in status_fields:
+        details_by_field = metadata.setdefault("metadataDetails", {})
+        if not isinstance(details_by_field, dict):
+            details_by_field = {}
+            metadata["metadataDetails"] = details_by_field
+        for field_name in (*LIST_METADATA_FIELDS, *STATUS_METADATA_FIELDS, "riskFlags"):
+            detail = details_by_field.get(field_name)
+            details_by_field[field_name] = detail.strip() if isinstance(detail, str) else ""
+        for field_name in STATUS_METADATA_FIELDS:
             evidence = self._evidence_lines(evidence_by_field.get(field_name))
             value = metadata.get(field_name)
             if value in {"yes", "no"} and not evidence:
@@ -362,13 +362,13 @@ class AppHandler(BaseHTTPRequestHandler):
             {
                 "applicationName": application_name,
                 "developer": developer_name,
-                "publisher_entity": developer_name,
-                "policy_url": self._optional_payload(payload, "policyUrl"),
-                "service_name": application_name,
-                "effective_date": self._optional_payload(payload, "effectiveDate"),
-                "document_hash": hash_code,
-                "change_summary": "",
-                "upload_method": upload_method,
+                "publisherEntity": developer_name,
+                "policyUrl": self._optional_payload(payload, "policyUrl"),
+                "serviceName": application_name,
+                "effectiveDate": self._optional_payload(payload, "effectiveDate"),
+                "documentHash": hash_code,
+                "changeSummary": "",
+                "uploadMethod": upload_method,
             }
         )
         if upload_method == "manual":
@@ -386,59 +386,36 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _empty_ai_metadata(self, raw_file: str) -> dict[str, Any]:
         """Create an unclassified draft that contains no keyword-rule results."""
-        list_fields = (
-            "data_type_tags",
-            "data_source_types",
-            "collection_context",
-            "processing_purpose",
-            "third_party_sources",
-            "downstream_stakeholders",
-            "third_party_purpose",
-            "regulatory_framework",
-            "risk_flags",
-        )
-        status_fields = (
-            "sharing_condition",
-            "consent_required",
-            "opt_out_available",
-            "deletion_available",
-            "request_channel",
-            "retention_policy",
-            "encryption_applied",
-            "anonymisation",
-            "cross_border_transfer",
-            "child_data_involved",
-            "contact_channel",
-        )
         metadata: dict[str, Any] = {
             "policyId": "pending-review",
             "policyVersion": None,
-            "policy_version": None,
-            "permitted_usage": [],
             "characterCount": len(raw_file),
             "wordCount": len(raw_file.split()),
             "sectionCount": 0,
             "sections": [],
             "keywordHits": {
-                "personal_data": [],
+                "personalData": [],
                 "sharing": [],
                 "retention": [],
                 "rights": [],
                 "security": [],
             },
             "metadataEvidence": {},
+            "metadataDetails": {},
             "metadataAssessment": {},
         }
-        for field_name in list_fields:
+        for field_name in (*LIST_METADATA_FIELDS, "riskFlags"):
             metadata[field_name] = []
             metadata["metadataEvidence"][field_name] = {}
+            metadata["metadataDetails"][field_name] = ""
             metadata["metadataAssessment"][field_name] = {}
-        for field_name in status_fields:
+        for field_name in STATUS_METADATA_FIELDS:
             metadata[field_name] = "unclear"
             metadata["metadataEvidence"][field_name] = []
+            metadata["metadataDetails"][field_name] = ""
             metadata["metadataAssessment"][field_name] = {
                 "confidence": 0.0,
-                "review_status": "needs_review",
+                "reviewStatus": "needs_review",
             }
         return metadata
 
@@ -457,10 +434,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.NOT_FOUND,
             )
             return
-        policy_version = stored["policy_version"]
+        policy_version = stored["policyVersion"]
         chain_record = registry.read_on_chain_record(
-            stored["developer_name"],
-            stored["policy_name"],
+            stored["developerName"],
+            stored["policyName"],
             policy_version,
         )
         if not chain_record:
@@ -475,28 +452,28 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
 
-        expected_hash = stored["hash_code"]
+        expected_hash = stored["hashCode"]
         normalized_submitted = normalize_policy_text(submitted_raw)
-        normalized_stored = normalize_policy_text(stored["raw_file"])
+        normalized_stored = normalize_policy_text(stored["rawFile"])
         stored_metadata_hash = hash_policy_bytes(canonical_metadata_bytes(stored["metadata"]))
-        audit = registry.audit_registration(stored["tx_hash"])
+        audit = registry.audit_registration(stored["txHash"])
         comparisons = {
             "submittedTextMatchesSql": normalized_submitted == normalized_stored,
             "submittedHashMatchesSql": submitted_hash == expected_hash,
             "sqlDocumentHashMatchesChain": "0x" + expected_hash == chain_record.data.documentHash,
             "sqlMetadataHashMatchesChain": "0x" + stored_metadata_hash == chain_record.data.metadataHash,
-            "storedMetadataHashMatchesSql": stored.get("metadata_hash", "") == stored_metadata_hash,
+            "storedMetadataHashMatchesSql": stored.get("metadataHash", "") == stored_metadata_hash,
             "calldataDocumentHashMatchesChain": audit["checks"]["documentHashMatchesStorage"],
             "calldataMetadataHashMatchesChain": audit["checks"]["metadataHashMatchesStorage"],
             "transactionSucceeded": audit["checks"]["transactionSucceeded"],
             "transactionTargetsContract": audit["checks"]["transactionTargetsContract"],
-            "publisherMatches": stored["developer_name"] == chain_record.data.publisherEntity,
-            "serviceNameMatches": stored["policy_name"] == chain_record.data.serviceName,
-            "versionMatches": stored["policy_version"] == chain_record.data.policyVersion,
-            "txHashMatches": stored["tx_hash"] == chain_record.txHash,
-            "recordKeyMatches": stored.get("record_key", "") == chain_record.recordKey,
-            "contractAddressMatches": stored.get("contract_address", "").lower() == chain_record.contractAddress.lower(),
-            "chainIdMatches": stored.get("chain_id") == chain_record.chainId,
+            "publisherMatches": stored["developerName"] == chain_record.data.publisherEntity,
+            "serviceNameMatches": stored["policyName"] == chain_record.data.serviceName,
+            "versionMatches": stored["policyVersion"] == chain_record.data.policyVersion,
+            "txHashMatches": stored["txHash"] == chain_record.txHash,
+            "recordKeyMatches": stored.get("recordKey", "") == chain_record.recordKey,
+            "contractAddressMatches": stored.get("contractAddress", "").lower() == chain_record.contractAddress.lower(),
+            "chainIdMatches": stored.get("chainId") == chain_record.chainId,
         }
         verified = all(comparisons.values())
         self._json(
@@ -530,49 +507,44 @@ class AppHandler(BaseHTTPRequestHandler):
             retries=int(os.environ.get("OLLAMA_RETRIES", "2")),
         )
         analysis = processor.analyze(raw_policy)
-        list_fields = (
-            "data_type_tags", "data_source_types", "collection_context",
-            "processing_purpose", "third_party_sources", "downstream_stakeholders",
-            "third_party_purpose", "regulatory_framework",
-        )
-        status_fields = (
-            "sharing_condition", "consent_required", "opt_out_available",
-            "deletion_available", "request_channel", "retention_policy",
-            "encryption_applied", "anonymisation", "cross_border_transfer",
-            "child_data_involved", "contact_channel",
-        )
-        for field_name in (*list_fields, *status_fields):
+        for field_name in (*LIST_METADATA_FIELDS, *STATUS_METADATA_FIELDS):
             field = getattr(analysis.fields, field_name)
             metadata[field_name] = field.value
             metadata["metadataEvidence"][field_name] = field.evidence
-            assessment = metadata.get("metadataAssessment", {}).get(field_name)
-            if isinstance(assessment, dict):
-                assessment.update(
-                    {
-                        "value": field.value,
-                        "review_status": "needs_review" if field.needs_review else "auto_extracted",
-                        "confidence": 0.5 if field.needs_review else 0.8,
-                    }
-                )
-            elif field_name in list_fields:
+            metadata["metadataDetails"][field_name] = field.details
+            if field_name in LIST_METADATA_FIELDS:
                 metadata["metadataAssessment"][field_name] = {
                     value: {
                         "confidence": 0.5 if field.needs_review else 0.8,
-                        "review_status": "needs_review" if field.needs_review else "auto_extracted",
+                        "reviewStatus": "needs_review" if field.needs_review else "auto_extracted",
                     }
                     for value in field.value
                 }
-        metadata["permitted_usage"] = list(metadata["processing_purpose"])
+            else:
+                metadata["metadataAssessment"][field_name] = {
+                    "value": field.value,
+                    "reviewStatus": "needs_review" if field.needs_review else "auto_extracted",
+                    "confidence": 0.5 if field.needs_review else 0.8,
+                }
         risk_flags = []
-        if metadata["retention_policy"] == "unclear":
+        if metadata["retentionPolicy"] == "unclear":
             risk_flags.append("unclear_retention")
-        if metadata["downstream_stakeholders"] and metadata["sharing_condition"] == "unclear":
+        if metadata["downstreamStakeholders"] and metadata["sharingCondition"] == "unclear":
             risk_flags.append("vague_third_party_sharing")
-        if metadata["deletion_available"] != "yes":
+        if metadata["deletionAvailable"] != "yes":
             risk_flags.append("no_deletion_method")
-        if any(tag in metadata["data_type_tags"] for tag in ("location", "voice_recording", "eye_tracking", "payment_info")):
+        if any(tag in metadata["dataTypeTags"] for tag in ("location", "voice_recording", "eye_tracking", "payment_info")):
             risk_flags.append("sensitive_data_involved")
-        metadata["risk_flags"] = risk_flags
+        if risk_flags:
+            risk_flags.append("review_recommended")
+        metadata["riskFlags"] = risk_flags
+        metadata["metadataDetails"]["riskFlags"] = " ".join(
+            RISK_FLAG_DETAILS[flag] for flag in risk_flags
+        )
+        metadata["metadataAssessment"]["riskFlags"] = {
+            flag: {"confidence": 0.8, "reviewStatus": "needs_review"}
+            for flag in risk_flags
+        }
         self._json(
             {
                 "analysis": analysis.model_dump(),
@@ -611,10 +583,10 @@ class AppHandler(BaseHTTPRequestHandler):
         return OnChainData(
             rawFile=raw_file,
             metadataJson=metadata_json,
-            policyVersion=self._metadata_text(metadata, "policy_version"),
-            publisherEntity=self._metadata_text(metadata, "publisher_entity"),
-            serviceName=self._metadata_text(metadata, "service_name"),
-            effectiveDate=self._metadata_text(metadata, "effective_date"),
+            policyVersion=self._metadata_text(metadata, "policyVersion"),
+            publisherEntity=self._metadata_text(metadata, "publisherEntity"),
+            serviceName=self._metadata_text(metadata, "serviceName"),
+            effectiveDate=self._metadata_text(metadata, "effectiveDate"),
         )
 
     def _metadata_text(self, metadata: dict[str, Any], key: str) -> str:
@@ -708,12 +680,12 @@ class AppHandler(BaseHTTPRequestHandler):
             {
                 "error": "This file content is already registered. No SQL or on-chain update was performed.",
                 "duplicate": {
-                    "policyId": duplicate["policy_id"],
-                    "applicationName": duplicate["policy_name"],
-                    "uploadTime": duplicate["policy_version"],
-                    "developer": duplicate.get("developer_name", ""),
+                    "policyId": duplicate["policyId"],
+                    "applicationName": duplicate["policyName"],
+                    "uploadTime": duplicate["policyVersion"],
+                    "developer": duplicate.get("developerName", ""),
                     "hashCode": hash_code,
-                    "createdAt": duplicate["created_at"],
+                    "createdAt": duplicate["createdAt"],
                 },
             },
             HTTPStatus.CONFLICT,

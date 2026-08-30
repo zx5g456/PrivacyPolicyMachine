@@ -1,5 +1,4 @@
 data/policies.db
-data/chain.json
 sources/dataset/
 source_size_analysis/
 __pycache__/

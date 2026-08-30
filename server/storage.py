@@ -16,7 +16,7 @@ class PolicyStore:
         self,
         policy_id: str,
         policy_name: str,
-        policy_version: str | None,
+        policy_version: str,
         developer_name: str,
         raw_file: str,
         hash_code: str,
@@ -24,20 +24,20 @@ class PolicyStore:
         metadata: dict[str, Any],
         report: dict[str, Any],
         tx_hash: str,
-        metadata_hash: str = "",
-        record_key: str = "",
-        block_number: int | None = None,
-        block_hash: str = "",
-        contract_address: str = "",
-        chain_id: int | None = None,
+        metadata_hash: str,
+        record_key: str,
+        block_number: int,
+        block_hash: str,
+        contract_address: str,
+        chain_id: int,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute(
                 """
                 insert into policies (
-                    policy_id, policy_name, policy_version, developer_name, raw_file, hash_code, upload_method,
-                    metadata_json, report_json, tx_hash, metadata_hash, record_key, block_number,
-                    block_hash, contract_address, chain_id
+                    policyId, policyName, policyVersion, developerName, rawFile, hashCode, uploadMethod,
+                    metadataJson, reportJson, txHash, metadataHash, recordKey, blockNumber,
+                    blockHash, contractAddress, chainId
                 ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -69,14 +69,14 @@ class PolicyStore:
         params: list[Any] = []
         where = ""
         if application_name:
-            where = "where lower(policy_name) like lower(?)"
+            where = "where lower(policyName) like lower(?)"
             params.append(f"%{application_name}%")
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 select * from policies
                 {where}
-                order by created_at desc, id desc
+                order by createdAt desc, id desc
                 """,
                 params,
             ).fetchall()
@@ -86,7 +86,7 @@ class PolicyStore:
         params: list[Any] = []
         where = ""
         if developer_name:
-            where = "where lower(developer_name) = lower(?)"
+            where = "where lower(developerName) = lower(?)"
             params.append(developer_name)
         with self._connect() as conn:
             rows = conn.execute(
@@ -94,24 +94,24 @@ class PolicyStore:
                 select p.*
                 from policies p
                 join (
-                    select policy_id, max(id) as latest_id
+                    select policyId, max(id) as latestId
                     from policies
                     {where}
-                    group by policy_id
-                ) latest on latest.latest_id = p.id
-                order by p.created_at desc, p.id desc
+                    group by policyId
+                ) latest on latest.latestId = p.id
+                order by p.createdAt desc, p.id desc
                 """,
                 params,
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
     def get_latest(self, policy_id: str, policy_version: str | None = None) -> dict[str, Any] | None:
-        sql = "select * from policies where policy_id = ?"
+        sql = "select * from policies where policyId = ?"
         params: list[Any] = [policy_id]
         if policy_version is not None:
-            sql += " and policy_version = ?"
+            sql += " and policyVersion = ?"
             params.append(policy_version)
-        sql += " order by created_at desc, id desc limit 1"
+        sql += " order by createdAt desc, id desc limit 1"
         with self._connect() as conn:
             row = conn.execute(sql, params).fetchone()
         return self._row_to_dict(row) if row else None
@@ -121,8 +121,8 @@ class PolicyStore:
             row = conn.execute(
                 """
                 select * from policies
-                where hash_code = ?
-                order by created_at desc, id desc
+                where hashCode = ?
+                order by createdAt desc, id desc
                 limit 1
                 """,
                 (hash_code,),
@@ -134,8 +134,8 @@ class PolicyStore:
             row = conn.execute(
                 """
                 select * from policies
-                where lower(policy_name) = lower(?)
-                order by created_at desc, id desc
+                where lower(policyName) = lower(?)
+                order by createdAt desc, id desc
                 limit 1
                 """,
                 (application_name,),
@@ -148,51 +148,30 @@ class PolicyStore:
                 """
                 create table if not exists policies (
                     id integer primary key autoincrement,
-                    policy_id text not null,
-                    policy_name text not null default '',
-                    policy_version text,
-                    developer_name text not null default '',
-                    raw_file text not null,
-                    hash_code text not null,
-                    upload_method text not null default 'fast',
-                    metadata_json text not null,
-                    report_json text not null,
-                    tx_hash text not null,
-                    metadata_hash text not null default '',
-                    record_key text not null default '',
-                    block_number integer,
-                    block_hash text not null default '',
-                    contract_address text not null default '',
-                    chain_id integer,
-                    created_at text not null default current_timestamp
+                    policyId text not null,
+                    policyName text not null default '',
+                    policyVersion text not null,
+                    developerName text not null default '',
+                    rawFile text not null,
+                    hashCode text not null unique,
+                    uploadMethod text not null default 'fast',
+                    metadataJson text not null,
+                    reportJson text not null,
+                    txHash text not null unique,
+                    metadataHash text not null,
+                    recordKey text not null unique,
+                    blockNumber integer not null,
+                    blockHash text not null default '',
+                    contractAddress text not null default '',
+                    chainId integer not null,
+                    createdAt text not null default current_timestamp,
+                    unique (policyId, policyVersion)
                 )
                 """
             )
-            columns = {
-                row["name"]
-                for row in conn.execute("pragma table_info(policies)").fetchall()
-            }
-            if "policy_name" not in columns:
-                conn.execute("alter table policies add column policy_name text not null default ''")
-            if "developer_name" not in columns:
-                conn.execute("alter table policies add column developer_name text not null default ''")
-            if "upload_method" not in columns:
-                conn.execute("alter table policies add column upload_method text not null default 'fast'")
-            migrations = {
-                "metadata_hash": "text not null default ''",
-                "record_key": "text not null default ''",
-                "block_number": "integer",
-                "block_hash": "text not null default ''",
-                "contract_address": "text not null default ''",
-                "chain_id": "integer",
-            }
-            for name, definition in migrations.items():
-                if name not in columns:
-                    conn.execute(f"alter table policies add column {name} {definition}")
-            conn.execute("create index if not exists idx_policies_policy_id on policies(policy_id)")
-            conn.execute("create index if not exists idx_policies_hash_code on policies(hash_code)")
-            conn.execute("create index if not exists idx_policies_policy_name on policies(policy_name)")
-            conn.execute("create index if not exists idx_policies_developer_name on policies(developer_name)")
+            conn.execute("create index if not exists idxPoliciesPolicyId on policies(policyId)")
+            conn.execute("create index if not exists idxPoliciesPolicyName on policies(policyName)")
+            conn.execute("create index if not exists idxPoliciesDeveloperName on policies(developerName)")
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -202,6 +181,6 @@ class PolicyStore:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        item["metadata"] = json.loads(item.pop("metadata_json"))
-        item["report"] = json.loads(item.pop("report_json"))
+        item["metadata"] = json.loads(item.pop("metadataJson"))
+        item["report"] = json.loads(item.pop("reportJson"))
         return item

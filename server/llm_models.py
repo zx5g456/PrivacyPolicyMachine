@@ -33,7 +33,11 @@ class ExtractedField(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     details: str = Field(
         default="",
-        description="A short explanation based only on the supplied policy text.",
+        description=(
+            "A concise explanation based only on the supplied policy text. Include concrete "
+            "conditions, periods, channels, safeguards, transfer mechanisms, locations, or age "
+            "thresholds when the field supports them; do not merely restate yes, no, or unclear."
+        ),
     )
     needs_review: bool = False
 
@@ -45,7 +49,13 @@ class ExtractedListField(BaseModel):
 
     value: list[str] = Field(default_factory=list)
     evidence: dict[str, list[str]] = Field(default_factory=dict)
-    details: str = Field(default="")
+    details: str = Field(
+        default="",
+        description=(
+            "A concise explanation based only on the supplied policy text, including named "
+            "providers, contexts, purposes, or usage limitations when available."
+        ),
+    )
     needs_review: bool = False
 
 
@@ -54,25 +64,26 @@ class PolicyChunkExtraction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    data_type_tags: ExtractedListField
-    data_source_types: ExtractedListField
-    collection_context: ExtractedListField
-    processing_purpose: ExtractedListField
-    third_party_sources: ExtractedListField
-    downstream_stakeholders: ExtractedListField
-    third_party_purpose: ExtractedListField
-    regulatory_framework: ExtractedListField
-    sharing_condition: ExtractedField
-    consent_required: ExtractedField
-    opt_out_available: ExtractedField
-    deletion_available: ExtractedField
-    request_channel: ExtractedField
-    retention_policy: ExtractedField
-    encryption_applied: ExtractedField
+    dataTypeTags: ExtractedListField
+    dataSourceTypes: ExtractedListField
+    collectionContext: ExtractedListField
+    processingPurpose: ExtractedListField
+    permittedUsage: ExtractedListField
+    thirdPartySources: ExtractedListField
+    downstreamStakeholders: ExtractedListField
+    thirdPartyPurpose: ExtractedListField
+    regulatoryFramework: ExtractedListField
+    sharingCondition: ExtractedField
+    consentRequired: ExtractedField
+    optOutAvailable: ExtractedField
+    deletionAvailable: ExtractedField
+    requestChannel: ExtractedField
+    retentionPolicy: ExtractedField
+    encryptionApplied: ExtractedField
     anonymisation: ExtractedField
-    cross_border_transfer: ExtractedField
-    child_data_involved: ExtractedField
-    contact_channel: ExtractedField
+    crossBorderTransfer: ExtractedField
+    childDataInvolved: ExtractedField
+    contactChannel: ExtractedField
 
 
 class PolicyAnalysis(BaseModel):

@@ -115,7 +115,7 @@ PORT=8002 .venv/bin/python -m server.app
 
 Create and register a new policy.
 
-This is the Fast Upload route. It runs keyword analysis and persists immediately with `upload_method=fast`.
+This is the Fast Upload route. It runs keyword analysis and persists immediately with `uploadMethod=fast`.
 
 Required multipart fields:
 
@@ -218,9 +218,10 @@ Accepted JSON fields:
 - `rawText`: pasted privacy-policy text.
 
 Alternatively, submit multipart form data with a `rawFile` upload. The response
-contains structured results for `sharing_condition`, `retention_policy`,
-`cross_border_transfer`, and `child_data_involved`, along with evidence and
-review/error information.
+contains structured results for `sharingCondition`, `retentionPolicy`,
+`crossBorderTransfer`, and `childDataInvolved`, along with evidence, details,
+and review/error information. `permittedUsage` is extracted independently from
+`processingPurpose`.
 
 The default model is `qwen3.5:9b`. It can be changed with
 `OLLAMA_MODEL`; timeout and retry count can be changed with
@@ -235,7 +236,9 @@ curl http://127.0.0.1:8000/api/analyze \
 
 ## Data Notes
 
-- Application name is currently stored in the database column `policy_name` for compatibility with the earlier prototype.
+- Application name is stored in the SQL column `policyName`.
+- Database records, API payloads, and canonical metadata JSON use camelCase keys throughout.
+- `metadataDetails` preserves a concise explanation for every reviewable metadata field; `metadataEvidence` retains the supporting policy quotations.
 - `policyVersion` is no longer entered by the user. It is generated from upload time.
 - The developer switcher is only a prototype display control. There is no login system yet.
 - If incoming policy content already exists, the API returns `409 Conflict` and does not write a new SQL or chain record.

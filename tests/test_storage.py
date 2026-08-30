@@ -7,39 +7,6 @@ from server.storage import PolicyStore
 
 
 class UploadMethodStorageTests(unittest.TestCase):
-    def test_existing_database_is_migrated_with_fast_default(self):
-        with tempfile.TemporaryDirectory() as directory:
-            db_path = Path(directory) / "policies.db"
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    """create table policies (
-                        id integer primary key autoincrement,
-                        policy_id text not null,
-                        policy_name text not null default '',
-                        policy_version text,
-                        developer_name text not null default '',
-                        raw_file text not null,
-                        hash_code text not null,
-                        metadata_json text not null,
-                        report_json text not null,
-                        tx_hash text not null,
-                        created_at text not null default current_timestamp
-                    )"""
-                )
-                conn.execute(
-                    """insert into policies (
-                        policy_id, policy_name, developer_name, raw_file, hash_code,
-                        metadata_json, report_json, tx_hash
-                    ) values ('old', 'Old App', 'alice', 'text', 'hash', '{}', '{}', 'tx')"""
-                )
-
-            store = PolicyStore(db_path)
-
-            self.assertEqual(store.get_latest("old")["upload_method"], "fast")
-            migrated = store.get_latest("old")
-            self.assertEqual(migrated["metadata_hash"], "")
-            self.assertEqual(migrated["record_key"], "")
-
     def test_upload_method_is_saved_and_returned(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PolicyStore(Path(directory) / "policies.db")
@@ -63,9 +30,45 @@ class UploadMethodStorageTests(unittest.TestCase):
                 chain_id=31337,
             )
 
-            self.assertEqual(policy["upload_method"], "manual")
-            self.assertEqual(policy["metadata_hash"], "metadata-hash")
-            self.assertEqual(policy["block_number"], 7)
+            self.assertEqual(policy["uploadMethod"], "manual")
+            self.assertEqual(policy["metadataHash"], "metadata-hash")
+            self.assertEqual(policy["blockNumber"], 7)
+            self.assertEqual(policy["policyId"], "policy-1")
+            self.assertNotIn("policy_id", policy)
+
+    def test_fresh_schema_rejects_duplicate_policy_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PolicyStore(Path(directory) / "policies.db")
+            common = {
+                "policy_name": "Reviewed App",
+                "developer_name": "alice",
+                "raw_file": "Privacy policy",
+                "hash_code": "same-hash",
+                "upload_method": "manual",
+                "metadata": {},
+                "report": {},
+                "metadata_hash": "metadata-hash",
+                "block_number": 7,
+                "block_hash": "block-hash",
+                "contract_address": "0xcontract",
+                "chain_id": 31337,
+            }
+            store.create_policy(
+                policy_id="policy-1",
+                policy_version="2026-08-30T10:00:00",
+                tx_hash="tx-1",
+                record_key="record-1",
+                **common,
+            )
+
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.create_policy(
+                    policy_id="policy-2",
+                    policy_version="2026-08-30T11:00:00",
+                    tx_hash="tx-2",
+                    record_key="record-2",
+                    **common,
+                )
 
 
 if __name__ == "__main__":

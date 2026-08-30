@@ -441,6 +441,13 @@ button {
   color: #8a530f;
 }
 
+.metadata-details {
+  margin: 7px 0 0;
+  color: #3f4d5d;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .evidence-list {
   display: grid;
   gap: 6px;
