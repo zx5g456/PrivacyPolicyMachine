@@ -6,8 +6,8 @@ from pathlib import Path
 from server.storage import PolicyStore
 
 
-class UploadMethodStorageTests(unittest.TestCase):
-    def test_upload_method_is_saved_and_returned(self):
+class PolicyStorageTests(unittest.TestCase):
+    def test_ai_upload_method_is_saved_and_returned(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PolicyStore(Path(directory) / "policies.db")
 
@@ -18,7 +18,6 @@ class UploadMethodStorageTests(unittest.TestCase):
                 developer_name="alice",
                 raw_file="Privacy policy",
                 hash_code="hash",
-                upload_method="manual",
                 metadata={},
                 report={},
                 tx_hash="tx",
@@ -30,7 +29,7 @@ class UploadMethodStorageTests(unittest.TestCase):
                 chain_id=31337,
             )
 
-            self.assertEqual(policy["uploadMethod"], "manual")
+            self.assertEqual(policy["uploadMethod"], "ai")
             self.assertEqual(policy["metadataHash"], "metadata-hash")
             self.assertEqual(policy["blockNumber"], 7)
             self.assertEqual(policy["policyId"], "policy-1")
@@ -44,7 +43,6 @@ class UploadMethodStorageTests(unittest.TestCase):
                 "developer_name": "alice",
                 "raw_file": "Privacy policy",
                 "hash_code": "same-hash",
-                "upload_method": "manual",
                 "metadata": {},
                 "report": {},
                 "metadata_hash": "metadata-hash",

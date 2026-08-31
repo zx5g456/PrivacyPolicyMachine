@@ -30,7 +30,6 @@ from .processor import (
     RISK_FLAG_DETAILS,
     STATUS_METADATA_FIELDS,
     canonical_metadata_bytes,
-    extract_metadata,
     generate_report,
     hash_policy,
     hash_policy_bytes,
@@ -89,11 +88,7 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             payload = self._read_payload()
-            if parsed.path == "/api/policies":
-                self._create_policy(payload)
-            elif parsed.path == "/api/policies/manual":
-                self._preview_policy_with_rules(payload)
-            elif parsed.path == "/api/policies/reviewed":
+            if parsed.path == "/api/policies/reviewed":
                 self._register_reviewed_policy(payload)
             elif parsed.path == "/api/policies/update":
                 self._update_policy(payload)
@@ -115,42 +110,6 @@ class AppHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    def _create_policy(self, payload: dict[str, Any]) -> None:
-        raw_file = self._raw_file(payload, required=True)
-        raw_bytes = self._raw_file_bytes(payload, raw_file)
-        policy_id = str(uuid.uuid4())
-        application_name = self._application_name(payload)
-        developer_name = self._developer_name(payload)
-        policy_version = self._upload_time()
-        hash_code = hash_policy_bytes(raw_bytes)
-        duplicate = store.get_by_hash(hash_code)
-        if duplicate:
-            self._duplicate_hash_response(duplicate, hash_code)
-            return
-        policy, metadata, report, chain_record = self._register_policy_version(
-            policy_id=policy_id,
-            policy_name=application_name,
-            policy_version=policy_version,
-            developer_name=developer_name,
-            raw_file=raw_file,
-            raw_bytes=raw_bytes,
-            hash_code=hash_code,
-            policy_url=self._optional_payload(payload, "policyUrl"),
-            effective_date=self._optional_payload(payload, "effectiveDate"),
-            change_summary="",
-            upload_method="fast",
-        )
-        self._json(
-            {
-                "policy": policy,
-                "metadata": metadata,
-                "report": report,
-                "onChain": self._chain_to_dict(chain_record),
-                "message": "Policy processed, stored, and registered.",
-            },
-            HTTPStatus.CREATED,
-        )
-
     def _update_policy(self, payload: dict[str, Any]) -> None:
         policy_id = self._required(payload, "policyId")
         developer_name = self._developer_name(payload)
@@ -164,11 +123,13 @@ class AppHandler(BaseHTTPRequestHandler):
         if existing.get("developerName", "").lower() != developer_name.lower():
             self._json({"error": "Only the developer who uploaded this application policy can update it."}, HTTPStatus.FORBIDDEN)
             return
+        metadata = self._reviewed_metadata(payload)
         hash_code = hash_policy_bytes(raw_bytes)
         duplicate = store.get_by_hash(hash_code)
         if duplicate:
             self._duplicate_hash_response(duplicate, hash_code)
             return
+        existing_metadata = existing.get("metadata", {})
         policy, metadata, report, chain_record = self._register_policy_version(
             policy_id=policy_id,
             policy_name=existing["policyName"],
@@ -177,10 +138,10 @@ class AppHandler(BaseHTTPRequestHandler):
             raw_file=raw_file,
             raw_bytes=raw_bytes,
             hash_code=hash_code,
-            policy_url=self._optional_payload(payload, "policyUrl"),
-            effective_date=self._optional_payload(payload, "effectiveDate"),
+            policy_url=self._optional_payload(payload, "policyUrl") or existing_metadata.get("policyUrl", ""),
+            effective_date=self._optional_payload(payload, "effectiveDate") or existing_metadata.get("effectiveDate", ""),
             change_summary=self._optional_payload(payload, "changeSummary"),
-            upload_method="fast",
+            reviewed_metadata=metadata,
         )
         self._json(
             {
@@ -205,10 +166,11 @@ class AppHandler(BaseHTTPRequestHandler):
         policy_url: str,
         effective_date: str,
         change_summary: str,
-        upload_method: str,
         reviewed_metadata: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any]:
-        metadata = reviewed_metadata or extract_metadata(raw_file, policy_id, policy_version)
+        if reviewed_metadata is None:
+            raise ValueError("AI-reviewed metadata is required for registration")
+        metadata = reviewed_metadata
         require_canonical_metadata_keys(metadata)
         metadata["policyId"] = policy_id
         metadata["policyVersion"] = policy_version
@@ -220,7 +182,7 @@ class AppHandler(BaseHTTPRequestHandler):
         metadata["effectiveDate"] = effective_date
         metadata["documentHash"] = hash_code
         metadata["changeSummary"] = change_summary
-        metadata["uploadMethod"] = upload_method
+        metadata["uploadMethod"] = "ai"
         metadata.setdefault("permittedUsage", [])
         metadata.setdefault("metadataDetails", {})
         metadata_bytes = canonical_metadata_bytes(metadata)
@@ -241,7 +203,6 @@ class AppHandler(BaseHTTPRequestHandler):
             raw_file=raw_file,
             hash_code=hash_code,
             metadata_hash=metadata_hash,
-            upload_method=upload_method,
             metadata=metadata,
             report=report,
             tx_hash=chain_record.txHash,
@@ -253,25 +214,11 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         return policy, metadata, report, chain_record
 
-    def _preview_policy_with_rules(self, payload: dict[str, Any]) -> None:
-        """Return keyword-rule analysis for human review without persisting it."""
-        self._preview_policy(payload, upload_method="manual")
-
     def _register_reviewed_policy(self, payload: dict[str, Any]) -> None:
-        """Persist metadata approved or edited on the review page."""
+        """Persist AI metadata approved or edited on the review page."""
         raw_file = self._raw_file(payload, required=True)
         raw_bytes = self._raw_file_bytes(payload, raw_file)
-        upload_method = self._required(payload, "uploadMethod")
-        if upload_method not in {"ai", "manual"}:
-            raise ValueError("uploadMethod must be ai or manual for reviewed registration")
-        try:
-            metadata = json.loads(self._required(payload, "metadataJson"))
-        except json.JSONDecodeError as exc:
-            raise ValueError("metadataJson must contain valid JSON") from exc
-        if not isinstance(metadata, dict) or not isinstance(metadata.get("keywordHits"), dict):
-            raise ValueError("metadataJson must contain the reviewed policy metadata")
-        self._normalize_reviewed_metadata(metadata)
-
+        metadata = self._reviewed_metadata(payload)
         policy_id = str(uuid.uuid4())
         policy_version = self._upload_time()
         application_name = self._application_name(payload)
@@ -292,7 +239,6 @@ class AppHandler(BaseHTTPRequestHandler):
             policy_url=self._optional_payload(payload, "policyUrl"),
             effective_date=self._optional_payload(payload, "effectiveDate"),
             change_summary="",
-            upload_method=upload_method,
             reviewed_metadata=metadata,
         )
         self._json(
@@ -301,10 +247,20 @@ class AppHandler(BaseHTTPRequestHandler):
                 "metadata": metadata,
                 "report": report,
                 "onChain": self._chain_to_dict(chain_record),
-                "message": "Reviewed policy stored and registered.",
+                "message": "AI-reviewed policy stored and registered.",
             },
             HTTPStatus.CREATED,
         )
+
+    def _reviewed_metadata(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            metadata = json.loads(self._required(payload, "metadataJson"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("metadataJson must contain valid JSON") from exc
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("metadataEvidence"), dict):
+            raise ValueError("metadataJson must contain the reviewed policy metadata")
+        self._normalize_reviewed_metadata(metadata)
+        return metadata
 
     def _normalize_reviewed_metadata(self, metadata: dict[str, Any]) -> None:
         """Prevent unsupported yes/no findings from being registered."""
@@ -344,7 +300,7 @@ class AppHandler(BaseHTTPRequestHandler):
             ]
         return []
 
-    def _preview_policy(self, payload: dict[str, Any], upload_method: str) -> tuple[str, dict[str, Any], str]:
+    def _preview_policy(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         raw_file = self._raw_file(payload, required=True)
         application_name = self._application_name(payload)
         developer_name = self._developer_name(payload)
@@ -353,11 +309,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if duplicate:
             self._duplicate_hash_response(duplicate, hash_code)
             return raw_file, {}, hash_code
-        metadata = (
-            extract_metadata(raw_file, "pending-review", None)
-            if upload_method == "manual"
-            else self._empty_ai_metadata(raw_file)
-        )
+        metadata = self._empty_ai_metadata(raw_file)
         metadata.update(
             {
                 "applicationName": application_name,
@@ -368,24 +320,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 "effectiveDate": self._optional_payload(payload, "effectiveDate"),
                 "documentHash": hash_code,
                 "changeSummary": "",
-                "uploadMethod": upload_method,
+                "uploadMethod": "ai",
             }
         )
-        if upload_method == "manual":
-            self._json(
-                {
-                    "metadata": metadata,
-                    "report": generate_report(metadata, hash_code),
-                    "uploadMethod": upload_method,
-                    "requiresReview": True,
-                    "persisted": False,
-                    "message": "Keyword analysis is ready for human review.",
-                }
-            )
         return raw_file, metadata, hash_code
 
     def _empty_ai_metadata(self, raw_file: str) -> dict[str, Any]:
-        """Create an unclassified draft that contains no keyword-rule results."""
+        """Create an unclassified draft for the AI model to populate."""
         metadata: dict[str, Any] = {
             "policyId": "pending-review",
             "policyVersion": None,
@@ -393,13 +334,6 @@ class AppHandler(BaseHTTPRequestHandler):
             "wordCount": len(raw_file.split()),
             "sectionCount": 0,
             "sections": [],
-            "keywordHits": {
-                "personalData": [],
-                "sharing": [],
-                "retention": [],
-                "rights": [],
-                "security": [],
-            },
             "metadataEvidence": {},
             "metadataDetails": {},
             "metadataAssessment": {},
@@ -498,7 +432,7 @@ class AppHandler(BaseHTTPRequestHandler):
         The returned evidence and review flags can be inspected before a later
         workflow decides whether any result is trustworthy enough to persist.
         """
-        raw_policy, metadata, hash_code = self._preview_policy(payload, upload_method="ai")
+        raw_policy, metadata, hash_code = self._preview_policy(payload)
         if not metadata:
             return
         processor = PolicyLLMProcessor(

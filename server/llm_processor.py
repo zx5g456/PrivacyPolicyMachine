@@ -26,7 +26,7 @@ from .llm_models import (
     PolicyChunk,
     PolicyChunkExtraction,
 )
-from .processor import METADATA_RULES
+from .processor import METADATA_OPTIONS
 
 
 DEFAULT_CHUNK_CHARS = 6_000
@@ -34,7 +34,7 @@ DEFAULT_OVERLAP_CHARS = 400
 
 
 FIELD_NAMES = tuple(PolicyChunkExtraction.model_fields)
-LIST_FIELD_NAMES = tuple(METADATA_RULES)
+LIST_FIELD_NAMES = tuple(METADATA_OPTIONS)
 STATUS_FIELD_NAMES = tuple(name for name in FIELD_NAMES if name not in LIST_FIELD_NAMES)
 
 # These terms are not used to perform the extraction.  They are a conservative
@@ -137,7 +137,7 @@ def validate_evidence(
     for field_name in FIELD_NAMES:
         field = getattr(extraction, field_name)
         if field_name in LIST_FIELD_NAMES:
-            allowed_values = METADATA_RULES[field_name]
+            allowed_values = METADATA_OPTIONS[field_name]
             valid_values: list[str] = []
             valid_evidence_by_value: dict[str, list[str]] = {}
             for value in field.value:
@@ -275,7 +275,7 @@ class PolicyLLMProcessor:
     def _analyze_chunk(self, chunk: PolicyChunk) -> PolicyChunkExtraction:
         allowed = "\n".join(
             f"- {name}: {', '.join(values)}"
-            for name, values in METADATA_RULES.items()
+            for name, values in METADATA_OPTIONS.items()
         )
         prompt = (
             f"Analyze policy chunk {chunk.index + 1}. Return the required JSON only.\n"

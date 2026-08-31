@@ -22,8 +22,6 @@ const recordList = document.querySelector("#recordList");
 const recordCount = document.querySelector("#recordCount");
 const manageableCount = document.querySelector("#manageableCount");
 const systemStatus = document.querySelector("#systemStatus");
-const methodDialog = document.querySelector("#methodDialog");
-const closeMethodDialog = document.querySelector("#closeMethodDialog");
 const reviewTab = document.querySelector("#reviewTab");
 const reviewMethod = document.querySelector("#reviewMethod");
 const reviewGuidance = document.querySelector("#reviewGuidance");
@@ -117,19 +115,18 @@ policyForm.addEventListener("submit", async (event) => {
     reportBox.textContent = "Please upload a policy file.";
     return;
   }
-  methodDialog.hidden = false;
+  await analyzeForReview(new FormData(policyForm), {
+    workflow: "create",
+    file: policyForm.rawFile.files[0],
+    applicationName: policyForm.applicationName.value.trim(),
+    developer: policyForm.developer.value,
+    policyUrl: policyForm.policyUrl.value.trim(),
+    effectiveDate: policyForm.effectiveDate.value,
+    statusBox: reportBox,
+  });
 });
 
-closeMethodDialog.addEventListener("click", () => { methodDialog.hidden = true; });
-methodDialog.addEventListener("click", (event) => {
-  if (event.target === methodDialog) {
-    methodDialog.hidden = true;
-  }
-});
-document.querySelectorAll("[data-upload-method]").forEach((button) => {
-  button.addEventListener("click", () => startUploadWorkflow(button.dataset.uploadMethod));
-});
-cancelReview.addEventListener("click", clearReview);
+cancelReview.addEventListener("click", () => clearReview());
 confirmReview.addEventListener("click", registerReviewedPolicy);
 
 queryForm.addEventListener("submit", async (event) => {
@@ -203,30 +200,28 @@ updateForm.addEventListener("submit", async (event) => {
     updateForm.rawFile.focus();
     return;
   }
-  const payload = new FormData(updateForm);
-  setBusy(true);
-  try {
-    const result = await postForm("/api/policies/update", payload);
-    renderProcessingResult(result);
-    updateBox.className = "verification pass";
-    updateBox.textContent = [
-      result.message,
-      `Policy ID: ${result.policy.policyId}`,
-      `Application Name: ${result.policy.policyName}`,
-      `Developer: ${result.policy.developerName}`,
-      `Upload method: ${uploadMethodLabel(result.policy.uploadMethod)}`,
-      `Uploaded: ${result.policy.policyVersion}`,
-      `Hash: ${shorten(result.policy.hashCode)}`,
-    ].join("\n");
-    await loadRecords();
-    managedPolicySelect.value = result.policy.policyId;
-    syncSelectedPolicy();
-  } catch (error) {
+  const selected = manageablePolicies.find((policy) => policy.policyId === updateForm.policyId.value);
+  if (!selected) {
     updateBox.className = "verification fail";
-    updateBox.textContent = formatError(error);
-  } finally {
-    setBusy(false);
+    updateBox.textContent = "The selected policy is no longer available. Refresh and try again.";
+    return;
   }
+  const payload = new FormData(updateForm);
+  const metadata = selected.metadata || {};
+  payload.append("applicationName", displayPolicyName(selected));
+  payload.append("policyUrl", metadata.policyUrl || "");
+  payload.append("effectiveDate", metadata.effectiveDate || "");
+  await analyzeForReview(payload, {
+    workflow: "update",
+    policyId: selected.policyId,
+    changeSummary: updateForm.changeSummary.value.trim(),
+    file: updateForm.rawFile.files[0],
+    applicationName: displayPolicyName(selected),
+    developer: updateForm.developer.value,
+    policyUrl: metadata.policyUrl || "",
+    effectiveDate: metadata.effectiveDate || "",
+    statusBox: updateBox,
+  });
 });
 
 async function postForm(path, payload) {
@@ -243,47 +238,40 @@ async function postForm(path, payload) {
   return data;
 }
 
-async function startUploadWorkflow(method) {
-  methodDialog.hidden = true;
-  const path = {
-    fast: "/api/policies",
-    ai: "/api/analyze",
-    manual: "/api/policies/manual",
-  }[method];
-  if (!path) {
-    return;
-  }
+async function analyzeForReview(payload, context) {
   setBusy(true);
-  reportBox.textContent = method === "ai" ? "Running local AI analysis..." : "Running keyword analysis...";
+  context.statusBox.className = context.workflow === "update" ? "verification" : context.statusBox.className;
+  context.statusBox.textContent = "Running local AI analysis...";
   try {
-    const result = await postForm(path, new FormData(policyForm));
-    if (method === "fast") {
-      await completeRegistration(result);
-      return;
-    }
-    openReview(result, method);
+    const result = await postForm("/api/analyze", payload);
+    openReview(result, context);
   } catch (error) {
-    reportBox.textContent = formatError(error);
+    if (context.workflow === "update") {
+      context.statusBox.className = "verification fail";
+    }
+    context.statusBox.textContent = formatError(error);
   } finally {
     setBusy(false);
   }
 }
 
-function openReview(result, method) {
+function openReview(result, context) {
   normalizeReviewMetadata(result.metadata);
   pendingReview = {
-    method,
+    workflow: context.workflow,
+    policyId: context.policyId || "",
+    changeSummary: context.changeSummary || "",
     metadata: structuredClone(result.metadata),
-    file: policyForm.rawFile.files[0],
-    applicationName: policyForm.applicationName.value.trim(),
-    developer: policyForm.developer.value,
-    policyUrl: policyForm.policyUrl.value.trim(),
-    effectiveDate: policyForm.effectiveDate.value,
+    file: context.file,
+    applicationName: context.applicationName,
+    developer: context.developer,
+    policyUrl: context.policyUrl,
+    effectiveDate: context.effectiveDate,
   };
-  reviewMethod.textContent = method === "ai" ? "AI upload · human approval required" : "Manual upload · keyword draft";
-  reviewGuidance.textContent = method === "ai"
-    ? "The local model produced the draft below. Check every value and correct it before registration."
-    : "Keyword rules produced the draft below. Edit any incorrect or incomplete values before registration.";
+  reviewMethod.textContent = context.workflow === "update"
+    ? "AI update · human approval required"
+    : "AI upload · human approval required";
+  reviewGuidance.textContent = "The local model produced the draft below. Check every value and correct it before registration.";
   reviewPolicy.textContent = pendingReview.file ? "Loading policy text..." : "Policy text unavailable.";
   if (pendingReview.file) {
     pendingReview.file.text().then((text) => { reviewPolicy.textContent = text; });
@@ -354,15 +342,30 @@ async function registerReviewedPolicy() {
   payload.append("developer", pendingReview.developer);
   payload.append("policyUrl", pendingReview.policyUrl);
   payload.append("effectiveDate", pendingReview.effectiveDate);
-  payload.append("uploadMethod", pendingReview.method);
   payload.append("metadataJson", JSON.stringify(pendingReview.metadata));
   payload.append("rawFile", pendingReview.file, pendingReview.file.name);
+  if (pendingReview.workflow === "update") {
+    payload.append("policyId", pendingReview.policyId);
+    payload.append("changeSummary", pendingReview.changeSummary);
+  }
+  const workflow = pendingReview.workflow;
+  const reviewedFile = pendingReview.file;
+  const path = workflow === "update" ? "/api/policies/update" : "/api/policies/reviewed";
   setBusy(true);
   try {
-    const result = await postForm("/api/policies/reviewed", payload);
-    await completeRegistration(result);
-    clearReview();
-    showView("create", { skipLoad: true });
+    const result = await postForm(path, payload);
+    await completeRegistration(result, reviewedFile);
+    if (workflow === "update") {
+      updateBox.className = "verification pass";
+      updateBox.textContent = [
+        result.message,
+        `Policy ID: ${result.policy.policyId}`,
+        `Application Name: ${result.policy.policyName}`,
+        `Uploaded: ${result.policy.policyVersion}`,
+        `Hash: ${shorten(result.policy.hashCode)}`,
+      ].join("\n");
+    }
+    clearReview(workflow);
   } catch (error) {
     reviewStatus.className = "verification fail";
     reviewStatus.textContent = formatError(error);
@@ -428,19 +431,20 @@ function reviewEvidenceLines(evidence) {
   return [String(evidence)].filter(Boolean);
 }
 
-function clearReview() {
+function clearReview(destination) {
+  const workflow = destination || (pendingReview && pendingReview.workflow) || "create";
   pendingReview = null;
   reviewFields.innerHTML = "";
   reviewPolicy.textContent = "";
   reviewTab.hidden = true;
-  showView("create", { skipLoad: true });
+  showView(workflow === "update" ? "update" : "create", { skipLoad: true });
 }
 
-async function completeRegistration(result) {
+async function completeRegistration(result, reviewedFile) {
   renderProcessingResult(result);
-  if (policyForm.rawFile.files.length) {
+  if (reviewedFile) {
     const transfer = new DataTransfer();
-    transfer.items.add(policyForm.rawFile.files[0]);
+    transfer.items.add(reviewedFile);
     verifyForm.rawFile.files = transfer.files;
   }
   verifyForm.applicationName.value = result.policy.policyName;
@@ -667,7 +671,7 @@ function shorten(value) {
 }
 
 function uploadMethodLabel(method) {
-  return { fast: "Fast Upload", ai: "AI Upload", manual: "Manual Upload" }[method] || method || "Fast Upload";
+  return method === "ai" ? "AI Upload" : "Legacy Upload";
 }
 
 function findOnChainRecord(policy) {

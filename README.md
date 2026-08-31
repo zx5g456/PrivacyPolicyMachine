@@ -12,7 +12,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - Switch between prototype developers in the top bar.
 - Update only the policies uploaded by the selected developer.
 - Prevent duplicate policy content from being registered twice.
-- Choose fast, AI-assisted, or manual-review registration and retain that method with each database record.
+- Analyze every new or updated policy with the local AI model and require human review before registration.
 
 ## Project Structure
 
@@ -21,7 +21,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - `web/static/styles.css`: UI styling.
 - `server/app.py`: HTTP server, API routes, policy registration, query, update, and verification.
 - `server/storage.py`: SQLite storage layer.
-- `server/processor.py`: simple metadata extraction, hash generation, and report generation.
+- `server/processor.py`: AI metadata constraints, hash generation, validation, and report generation.
 - `server/llm_models.py`: local LLM result models and domain errors.
 - `server/llm_client.py`: Ollama client, prompt, and connection configuration.
 - `server/llm_processor.py`: policy chunking, evidence validation, retries, and result aggregation.
@@ -53,7 +53,7 @@ deploys the contract, passes its RPC URL and address to the event listener and
 Python web server, and starts both services. Press `Ctrl+C` once to stop all of
 them.
 
-The manual multi-terminal sequence below is only needed when debugging an
+The multi-terminal sequence below is only needed when debugging an
 individual component.
 
 Then use three terminals. Hardhat is the real local EVM used by the web app;
@@ -102,20 +102,20 @@ PORT=8002 .venv/bin/python -m server.app
 
 1. Choose a developer from the top-bar `Developer` selector.
 2. In `Create Policy`, enter an `Application Name` and upload a policy file.
-3. Choose Fast Upload, AI Upload, or Manual Upload.
-4. AI and Manual uploads open a review page before anything is persisted; Fast Upload registers immediately.
-5. The app registers the approved policy with a generated UUID and an upload-time policy version.
+3. Submit the file for local AI analysis. Nothing is persisted during analysis.
+4. Review and edit the AI-extracted metadata, details, and evidence.
+5. Confirm the review to register the policy with a generated UUID and an upload-time policy version.
 6. Use `Query` to search by application name. Matching records appear in `Registered Records`, and the latest match's full policy text is shown in the Query panel.
 7. Use `Verification` by entering the application name and either uploading a policy file or pasting policy text.
-8. Use `Update Policy` to update an existing policy. The dropdown only shows policies uploaded by the currently selected developer.
+8. Use `Update Policy` to analyze and review a new version. The dropdown only shows policies uploaded by the currently selected developer.
 
 ## API
 
-### `POST /api/policies`
+### `POST /api/analyze`
 
-Create and register a new policy.
-
-This is the Fast Upload route. It runs keyword analysis and persists immediately with `uploadMethod=fast`.
+Analyze policy text with the local Ollama model and return a review draft. This
+preview endpoint does not write to SQLite or the blockchain. Its response uses
+`uploadMethod=ai` and `requiresReview=true`.
 
 Required multipart fields:
 
@@ -127,26 +127,15 @@ Optional multipart fields:
 
 - `policyUrl`: source URL for the published policy.
 - `effectiveDate`: effective date stated by the policy.
-- `changeSummary`: summary of what changed, mainly used during updates.
 
-The server generates:
-
-- `policyId`: UUID used only by the off-chain database/API.
-- `policyVersion`: upload time.
-- `hashCode`: SHA-256 hash of the policy text, used only off-chain for duplicate detection and reporting.
-- EVM transaction and block data returned by the deployed Solidity contract.
-
-### `POST /api/analyze`
-
-Run local Ollama analysis without keyword-rule extraction and return a review draft. Nothing is persisted. The response uses `uploadMethod=ai` and `requiresReview=true`.
-
-### `POST /api/policies/manual`
-
-Run keyword analysis and return a review draft. Nothing is persisted. The response uses `uploadMethod=manual` and `requiresReview=true`.
+The structured response includes extracted values, evidence, details, and review
+flags. `permittedUsage` is extracted independently from `processingPurpose`.
 
 ### `POST /api/policies/reviewed`
 
-Register an AI or manually reviewed draft. Requires the original policy file, `uploadMethod`, and `metadataJson`. The server assigns the final ID, version, hash, and identity metadata.
+Register an AI-reviewed draft. Required multipart fields are `applicationName`,
+`developer`, the original `rawFile`, and the approved `metadataJson`. The server
+assigns the final ID, upload-time version, hashes, and identity metadata.
 
 ### `GET /api/policies`
 
@@ -189,8 +178,11 @@ Required multipart fields:
 - `policyId`: existing policy ID.
 - `developer`: current prototype developer.
 - `rawFile`: new uploaded policy file.
+- `metadataJson`: AI-extracted metadata approved on the review page.
 
-The server only allows the update when the selected developer matches the latest record's developer.
+The server only allows the update when the selected developer matches the latest
+record's developer. Updates must pass through `/api/analyze` and human review
+before this endpoint is called.
 
 ### `POST /api/verify`
 
@@ -208,20 +200,7 @@ Verification compares:
 - SQL and recovered canonical metadata hashes against the contract's `metadataHash`.
 - publisher, service name, and upload-time version against the contract record.
 
-### `POST /api/analyze`
-
-Analyze policy text with a local Ollama model. This preview endpoint does not
-write to SQLite or the blockchain.
-
-Accepted JSON fields:
-
-- `rawText`: pasted privacy-policy text.
-
-Alternatively, submit multipart form data with a `rawFile` upload. The response
-contains structured results for `sharingCondition`, `retentionPolicy`,
-`crossBorderTransfer`, and `childDataInvolved`, along with evidence, details,
-and review/error information. `permittedUsage` is extracted independently from
-`processingPurpose`.
+### Local Ollama configuration
 
 The default model is `qwen3.5:9b`. It can be changed with
 `OLLAMA_MODEL`; timeout and retry count can be changed with
@@ -230,8 +209,9 @@ The default model is `qwen3.5:9b`. It can be changed with
 ```bash
 ollama pull qwen3.5:9b
 curl http://127.0.0.1:8000/api/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"rawText":"We retain account records for seven years."}'
+  -F applicationName=ExampleApp \
+  -F developer=alice \
+  -F rawFile=@privacy-policy.txt
 ```
 
 ## Data Notes
