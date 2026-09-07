@@ -6,7 +6,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 
 - Create a policy by entering an application name and uploading a policy file.
 - Automatically use the upload time as the policy version.
-- Put the complete raw policy bytes and canonical metadata JSON in transaction calldata, while storing their hashes and core identity fields in contract storage.
+- Store the complete raw policy bytes and canonical metadata JSON in ordered chunks in L2 contract storage.
 - Query policies by application name and view the full policy text.
 - Verify a policy by entering the application name and uploading a file or pasting policy text.
 - Switch between prototype developers in the top bar.
@@ -25,7 +25,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - `server/llm_models.py`: local LLM result models and domain errors.
 - `server/llm_client.py`: Ollama client, prompt, and connection configuration.
 - `server/llm_processor.py`: policy chunking, evidence validation, retries, and result aggregation.
-- `server/blockchain.py`: Web3 client that sends transactions to and reads records from the deployed contract.
+- `server/blockchain.py`: Web3 client for resumable chunk uploads, contract-storage reads, and independent content audits.
 - `contracts/TrustedPolicyRegistry.sol`: Solidity policy registry used by the web application.
 - `scripts/deploy-contract.js`: deploys the registry to the configured RPC network.
 - `offchain-listener/listener.js`: listens for successful on-chain policy registrations and starts off-chain work.
@@ -81,8 +81,9 @@ export CONTRACT_DEPLOYMENT_BLOCK=1
 ```
 
 Every create, reviewed registration, and update submitted in the web UI now
-sends a transaction to this deployed Solidity contract before its SQL row is
-saved. Keep the chain running while using the application.
+sends a manifest transaction, one transaction per content chunk, and a finalization
+transaction before its SQL row is saved. Keep the chain running while using the
+application.
 
 The server tries `http://127.0.0.1:8000` first. If port `8000` is already in use, it automatically chooses the next available port and prints the URL, for example:
 
@@ -104,7 +105,7 @@ PORT=8002 .venv/bin/python -m server.app
 2. In `Create Policy`, enter an `Application Name` and upload a policy file.
 3. Submit the file for local AI analysis. Nothing is persisted during analysis.
 4. Review and edit the AI-extracted metadata, details, and evidence.
-5. Confirm the review to register the policy with a generated UUID and an upload-time policy version.
+5. Confirm the review to upload the content chunks and finalize the policy with the UUID and upload-time version assigned to the review draft.
 6. Use `Query` to search by application name. Matching records appear in `Registered Records`, and the latest match's full policy text is shown in the Query panel.
 7. Use `Verification` by entering the application name and either uploading a policy file or pasting policy text.
 8. Use `Update Policy` to analyze and review a new version. The dropdown only shows policies uploaded by the currently selected developer.
@@ -128,14 +129,17 @@ Optional multipart fields:
 - `policyUrl`: source URL for the published policy.
 - `effectiveDate`: effective date stated by the policy.
 
-The structured response includes extracted values, evidence, details, and review
-flags. `permittedUsage` is extracted independently from `processingPurpose`.
+The structured response includes a stable draft `policyId` and `policyVersion`,
+extracted values, evidence, details, and review flags. Reusing that reviewed draft
+allows an interrupted on-chain upload to resume. `permittedUsage` is extracted
+independently from `processingPurpose`.
 
 ### `POST /api/policies/reviewed`
 
 Register an AI-reviewed draft. Required multipart fields are `applicationName`,
 `developer`, the original `rawFile`, and the approved `metadataJson`. The server
-assigns the final ID, upload-time version, hashes, and identity metadata.
+validates the draft ID and upload-time version assigned by `/api/analyze`, then
+adds the hashes and finalized identity metadata.
 
 ### `GET /api/policies`
 
@@ -196,8 +200,8 @@ Required multipart fields:
 Verification compares:
 
 - submitted policy text against the latest SQL record after normalizing case, whitespace, and punctuation.
-- SQL and recovered-calldata policy hashes against the contract's `documentHash`.
-- SQL and recovered canonical metadata hashes against the contract's `metadataHash`.
+- submitted and SQL hashes against content reconstructed from contract storage.
+- reconstructed document and metadata hashes, sizes, chunk counts, and ordered chunk commitments against the finalized contract record.
 - publisher, service name, and upload-time version against the contract record.
 
 ### Local Ollama configuration
@@ -224,12 +228,51 @@ curl http://127.0.0.1:8000/api/analyze \
 - If incoming policy content already exists, the API returns `409 Conflict` and does not write a new SQL or chain record.
 - `sources/dataset/` is ignored by Git so the local dataset is not uploaded.
 
+## Chunked L2 Storage
+
+Registration is a three-stage protocol:
+
+1. `beginPolicyRegistration` creates a pending manifest containing identity,
+   expected byte sizes, and SHA-256 hashes.
+2. `appendDocumentChunk` and `appendMetadataChunk` write exact byte slices to
+   contract storage in strictly increasing index order. Each successful chunk is
+   committed by `keccak256(previousCommitment, index, byteLength, sha256(chunk))`.
+3. `finalizePolicyRegistration` succeeds only when both declared byte lengths
+   have been stored. Only then is the record added to the public version index.
+
+The server defaults to 8 KiB transactions and never exceeds the contract's
+24 KiB per-chunk ceiling. Configure a smaller starting size for a target L2 with:
+
+```bash
+export ONCHAIN_CHUNK_BYTES=4096
+```
+
+Before sending a chunk, the server estimates its gas. If the estimate cannot fit,
+the chunk is reduced and retried before any transaction is sent. If a request is
+interrupted after confirmed chunks, submitting the same reviewed draft reads the
+pending manifest, validates every stored prefix byte, and resumes at the next
+index. Pending uploads are not visible as trusted records.
+
+The LLM uses a separate, overlapping text-chunk process for model context. LLM
+chunks are character slices; on-chain chunks are exact bytes and must not be
+interchanged.
+
+Solidity functions still use the `calldata` data-location keyword for external
+parameters. This is only an EVM input type: the application no longer treats
+historical transaction input as the persistent policy archive.
+
 ## On-chain Record Class
 
 ```text
 TrustedPolicyRecord
 - documentHash: bytes32 (SHA-256 of the exact raw file bytes)
 - metadataHash: bytes32 (SHA-256 of canonical metadata JSON)
+- documentChunkCommitment: bytes32
+- metadataChunkCommitment: bytes32
+- documentSize: uint64
+- metadataSize: uint64
+- documentChunkCount: uint32
+- metadataChunkCount: uint32
 - publisherEntity: string
 - serviceName: string
 - policyVersion: string
@@ -240,31 +283,45 @@ TrustedPolicyRecord
 - hasPreviousReference: bool
 ```
 
-The complete raw file and metadata JSON are included in the successful registration transaction's calldata but are not copied into contract storage. The contract computes and permanently stores both hashes. The API's UUID `policyId` remains off-chain.
+The complete raw file and metadata JSON are permanently stored in the contract's
+chunk mappings. The contract computes each chunk hash and ordered commitment as
+chunks arrive. The server supplies the interoperable whole-content SHA-256 in the
+pending manifest, then reconstructs the finalized storage and verifies that hash.
+This avoids concatenating an arbitrarily large file inside one finalization call.
+The API's UUID `policyId` remains an application identifier inside canonical
+metadata; `recordKey` is the on-chain identifier for a policy version.
 
-## Independent calldata audit
+## Independent on-chain storage audit
 
-An auditor needs the chain RPC URL, contract address, transaction hash, and matching contract ABI. The audit verifies the receipt, destination contract, called function, sender, event, storage record, both content hashes, and version identity without trusting SQLite:
+An auditor needs the chain RPC URL, contract address, a finalized `recordKey` or
+finalization transaction hash, and the matching contract ABI. The audit reads all
+chunks from contract storage and verifies the receipt, destination contract,
+finalization call, sender, event, sizes, counts, both hashes, and both ordered
+commitments without trusting SQLite:
 
 ```bash
 .venv/bin/python scripts/audit-registration.py \
-  0xTransactionHash \
+  0xRecordKeyOrFinalizationTransactionHash \
   --rpc-url http://127.0.0.1:8545 \
   --contract-address 0xContractAddress \
   --output-dir recovered-audit
 ```
 
-The optional output directory receives the exact `raw-file.bin` bytes and canonical `metadata.json` recovered from transaction calldata. The same summary is available while the server is running:
+The optional output directory receives the exact `raw-file.bin` bytes and
+canonical `metadata.json` reconstructed from contract storage. The same summary
+is available while the server is running:
 
 ```text
-GET /api/audit/{txHash}
+GET /api/audit/{recordKey-or-finalization-txHash}
 ```
 
-Calldata is public. Do not register secrets or personal information that should not be publicly recoverable. A restarted `npm run dev` creates a new ephemeral Hardhat chain, so durable third-party audit requires a persistent network.
+Contract storage is public. Do not register secrets or personal information that
+should not be publicly recoverable. A restarted `npm run dev` creates a new
+ephemeral Hardhat chain, so durable third-party audit requires a persistent L2.
 
 ## Off-chain Event Listener (Experimental)
 
-Every successful `registerTrustedPolicyRecord` transaction emits the contract's
+Every successful `finalizePolicyRegistration` transaction emits the contract's
 `TrustedPolicyRecordRegistered` event. Its indexed `recordKey` is the unique
 on-chain ID for that policy version; this is the `policyId` printed by the
 experimental listener. The UUID called `policyId` by the local API remains an
@@ -330,7 +387,8 @@ export CONTRACT_DEPLOYMENT_BLOCK=1
 ```
 
 Terminal 4 — open the URL printed by the server and create or update a policy.
-The API response includes its real transaction and block data. At the same time,
+The API response includes its finalization transaction, chunk transaction list,
+and block data. At the same time,
 Terminal 2 prints the event detection time and the same on-chain policy ID.
 Restarting the Hardhat node creates a fresh chain, so deploy the contract again
 and use its new address after every restart.

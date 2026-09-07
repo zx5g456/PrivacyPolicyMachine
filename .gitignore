@@ -1,5 +1,6 @@
 data/policies.db
 sources/dataset/
+sources/test_sets/
 source_size_analysis/
 __pycache__/
 *.pyc

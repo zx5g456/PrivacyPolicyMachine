@@ -29,6 +29,13 @@ class PolicyStore:
         block_hash: str,
         contract_address: str,
         chain_id: int,
+        chain_transactions: list[dict[str, Any]] | None = None,
+        document_chunk_count: int = 0,
+        metadata_chunk_count: int = 0,
+        document_size: int = 0,
+        metadata_size: int = 0,
+        document_chunk_commitment: str = "",
+        metadata_chunk_commitment: str = "",
     ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute(
@@ -36,8 +43,10 @@ class PolicyStore:
                 insert into policies (
                     policyId, policyName, policyVersion, developerName, rawFile, hashCode, uploadMethod,
                     metadataJson, reportJson, txHash, metadataHash, recordKey, blockNumber,
-                    blockHash, contractAddress, chainId
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    blockHash, contractAddress, chainId, chainTransactionsJson,
+                    documentChunkCount, metadataChunkCount, documentSize, metadataSize,
+                    documentChunkCommitment, metadataChunkCommitment
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     policy_id,
@@ -56,6 +65,13 @@ class PolicyStore:
                     block_hash,
                     contract_address,
                     chain_id,
+                    json.dumps(chain_transactions or [], ensure_ascii=False),
+                    document_chunk_count,
+                    metadata_chunk_count,
+                    document_size,
+                    metadata_size,
+                    document_chunk_commitment,
+                    metadata_chunk_commitment,
                 ),
             )
             conn.commit()
@@ -163,15 +179,42 @@ class PolicyStore:
                     blockHash text not null default '',
                     contractAddress text not null default '',
                     chainId integer not null,
+                    chainTransactionsJson text not null default '[]',
+                    documentChunkCount integer not null default 0,
+                    metadataChunkCount integer not null default 0,
+                    documentSize integer not null default 0,
+                    metadataSize integer not null default 0,
+                    documentChunkCommitment text not null default '',
+                    metadataChunkCommitment text not null default '',
                     createdAt text not null default current_timestamp,
                     unique (policyId, policyVersion)
                 )
                 """
             )
+            self._add_missing_columns(conn)
             conn.execute("create index if not exists idxPoliciesPolicyId on policies(policyId)")
             conn.execute("create index if not exists idxPoliciesPolicyName on policies(policyName)")
             conn.execute("create index if not exists idxPoliciesDeveloperName on policies(developerName)")
             conn.commit()
+
+    def _add_missing_columns(self, conn: sqlite3.Connection) -> None:
+        """Migrate databases created before chunked on-chain storage was added."""
+        existing = {
+            row["name"]
+            for row in conn.execute("pragma table_info(policies)").fetchall()
+        }
+        columns = {
+            "chainTransactionsJson": "text not null default '[]'",
+            "documentChunkCount": "integer not null default 0",
+            "metadataChunkCount": "integer not null default 0",
+            "documentSize": "integer not null default 0",
+            "metadataSize": "integer not null default 0",
+            "documentChunkCommitment": "text not null default ''",
+            "metadataChunkCommitment": "text not null default ''",
+        }
+        for name, declaration in columns.items():
+            if name not in existing:
+                conn.execute(f"alter table policies add column {name} {declaration}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -182,4 +225,5 @@ class PolicyStore:
         item = dict(row)
         item["metadata"] = json.loads(item.pop("metadataJson"))
         item["report"] = json.loads(item.pop("reportJson"))
+        item["chainTransactions"] = json.loads(item.pop("chainTransactionsJson", "[]"))
         return item

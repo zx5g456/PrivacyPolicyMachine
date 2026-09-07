@@ -31,7 +31,6 @@ from .processor import (
     STATUS_METADATA_FIELDS,
     canonical_metadata_bytes,
     generate_report,
-    hash_policy,
     hash_policy_bytes,
     normalize_policy_text,
     require_canonical_metadata_keys,
@@ -113,7 +112,6 @@ class AppHandler(BaseHTTPRequestHandler):
     def _update_policy(self, payload: dict[str, Any]) -> None:
         policy_id = self._required(payload, "policyId")
         developer_name = self._developer_name(payload)
-        policy_version = self._upload_time()
         raw_file = self._raw_file(payload, required=True)
         raw_bytes = self._raw_file_bytes(payload, raw_file)
         existing = store.get_latest(policy_id)
@@ -124,6 +122,9 @@ class AppHandler(BaseHTTPRequestHandler):
             self._json({"error": "Only the developer who uploaded this application policy can update it."}, HTTPStatus.FORBIDDEN)
             return
         metadata = self._reviewed_metadata(payload)
+        reviewed_policy_id, policy_version = self._review_registration_identity(metadata)
+        if reviewed_policy_id != policy_id:
+            raise ValueError("Reviewed metadata does not belong to the selected policy")
         hash_code = hash_policy_bytes(raw_bytes)
         duplicate = store.get_by_hash(hash_code)
         if duplicate:
@@ -211,6 +212,13 @@ class AppHandler(BaseHTTPRequestHandler):
             block_hash=chain_record.blockHash,
             contract_address=chain_record.contractAddress,
             chain_id=chain_record.chainId,
+            chain_transactions=[asdict(transaction) for transaction in chain_record.transactions],
+            document_chunk_count=chain_record.data.documentChunkCount,
+            metadata_chunk_count=chain_record.data.metadataChunkCount,
+            document_size=chain_record.data.documentSize,
+            metadata_size=chain_record.data.metadataSize,
+            document_chunk_commitment=chain_record.data.documentChunkCommitment,
+            metadata_chunk_commitment=chain_record.data.metadataChunkCommitment,
         )
         return policy, metadata, report, chain_record
 
@@ -219,8 +227,9 @@ class AppHandler(BaseHTTPRequestHandler):
         raw_file = self._raw_file(payload, required=True)
         raw_bytes = self._raw_file_bytes(payload, raw_file)
         metadata = self._reviewed_metadata(payload)
-        policy_id = str(uuid.uuid4())
-        policy_version = self._upload_time()
+        policy_id, policy_version = self._review_registration_identity(metadata)
+        if store.get_latest(policy_id):
+            raise ValueError("Reviewed policy ID is already registered")
         application_name = self._application_name(payload)
         developer_name = self._developer_name(payload)
         hash_code = hash_policy_bytes(raw_bytes)
@@ -262,6 +271,23 @@ class AppHandler(BaseHTTPRequestHandler):
         self._normalize_reviewed_metadata(metadata)
         return metadata
 
+    def _review_registration_identity(self, metadata: dict[str, Any]) -> tuple[str, str]:
+        policy_id = metadata.get("policyId")
+        policy_version = metadata.get("policyVersion")
+        if not isinstance(policy_id, str):
+            raise ValueError("Reviewed metadata is missing its policyId")
+        try:
+            uuid.UUID(policy_id)
+        except ValueError as exc:
+            raise ValueError("Reviewed metadata contains an invalid policyId") from exc
+        if not isinstance(policy_version, str):
+            raise ValueError("Reviewed metadata is missing its policyVersion")
+        try:
+            datetime.fromisoformat(policy_version)
+        except ValueError as exc:
+            raise ValueError("Reviewed metadata contains an invalid policyVersion") from exc
+        return policy_id, policy_version
+
     def _normalize_reviewed_metadata(self, metadata: dict[str, Any]) -> None:
         """Prevent unsupported yes/no findings from being registered."""
         require_canonical_metadata_keys(metadata)
@@ -302,16 +328,27 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _preview_policy(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         raw_file = self._raw_file(payload, required=True)
+        raw_bytes = self._raw_file_bytes(payload, raw_file)
         application_name = self._application_name(payload)
         developer_name = self._developer_name(payload)
-        hash_code = hash_policy(raw_file)
+        hash_code = hash_policy_bytes(raw_bytes)
         duplicate = store.get_by_hash(hash_code)
         if duplicate:
             self._duplicate_hash_response(duplicate, hash_code)
             return raw_file, {}, hash_code
         metadata = self._empty_ai_metadata(raw_file)
+        requested_policy_id = self._optional_payload(payload, "policyId")
+        if requested_policy_id:
+            try:
+                uuid.UUID(requested_policy_id)
+            except ValueError as exc:
+                raise ValueError("policyId must be a UUID") from exc
+        else:
+            requested_policy_id = str(uuid.uuid4())
         metadata.update(
             {
+                "policyId": requested_policy_id,
+                "policyVersion": self._upload_time(),
                 "applicationName": application_name,
                 "developer": developer_name,
                 "publisherEntity": developer_name,
@@ -390,17 +427,23 @@ class AppHandler(BaseHTTPRequestHandler):
         normalized_submitted = normalize_policy_text(submitted_raw)
         normalized_stored = normalize_policy_text(stored["rawFile"])
         stored_metadata_hash = hash_policy_bytes(canonical_metadata_bytes(stored["metadata"]))
-        audit = registry.audit_registration(stored["txHash"])
+        audit = registry.audit_registration(stored["recordKey"])
+        on_chain_content = registry.read_on_chain_content(stored["recordKey"])
         comparisons = {
             "submittedTextMatchesSql": normalized_submitted == normalized_stored,
             "submittedHashMatchesSql": submitted_hash == expected_hash,
+            "submittedHashMatchesOnChainContent": (
+                "0x" + submitted_hash == on_chain_content.document_hash
+            ),
             "sqlDocumentHashMatchesChain": "0x" + expected_hash == chain_record.data.documentHash,
             "sqlMetadataHashMatchesChain": "0x" + stored_metadata_hash == chain_record.data.metadataHash,
             "storedMetadataHashMatchesSql": stored.get("metadataHash", "") == stored_metadata_hash,
-            "calldataDocumentHashMatchesChain": audit["checks"]["documentHashMatchesStorage"],
-            "calldataMetadataHashMatchesChain": audit["checks"]["metadataHashMatchesStorage"],
-            "transactionSucceeded": audit["checks"]["transactionSucceeded"],
-            "transactionTargetsContract": audit["checks"]["transactionTargetsContract"],
+            "onChainDocumentHashValid": audit["checks"]["documentHashMatchesStoredContent"],
+            "onChainMetadataHashValid": audit["checks"]["metadataHashMatchesStoredContent"],
+            "onChainDocumentCommitmentValid": audit["checks"]["documentCommitmentMatchesStorage"],
+            "onChainMetadataCommitmentValid": audit["checks"]["metadataCommitmentMatchesStorage"],
+            "finalizationTransactionSucceeded": audit["checks"]["finalizationTransactionSucceeded"],
+            "finalizationTargetsContract": audit["checks"]["finalizationTargetsContract"],
             "publisherMatches": stored["developerName"] == chain_record.data.publisherEntity,
             "serviceNameMatches": stored["policyName"] == chain_record.data.serviceName,
             "versionMatches": stored["policyVersion"] == chain_record.data.policyVersion,
