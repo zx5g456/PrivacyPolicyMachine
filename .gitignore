@@ -1,7 +1,9 @@
 data/policies.db
+data/compliance-results/
 sources/dataset/
 sources/test_sets/
 source_size_analysis/
+compliance tool/
 __pycache__/
 *.pyc
 .env

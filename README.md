@@ -28,7 +28,10 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - `server/blockchain.py`: Web3 client for resumable chunk uploads, contract-storage reads, and independent content audits.
 - `contracts/TrustedPolicyRegistry.sol`: Solidity policy registry used by the web application.
 - `scripts/deploy-contract.js`: deploys the registry to the configured RPC network.
-- `offchain-listener/listener.js`: listens for successful on-chain policy registrations and starts off-chain work.
+- `offchain-listener/listener.js`: listens for successful on-chain policy registrations, reconstructs the registered raw file, and runs compliance P2/P3.
+- `compliance tool/run_compliance.py`: adapts one on-chain raw file to the original directory-based P2/P3 command interfaces.
+- `compliance tool/P2/information_extract.py`: extracts policy information with the GPT API.
+- `compliance tool/P3/evaluate_checklist.py`: evaluates the extracted information against the compliance checklist.
 - `data/policies.db`: local SQLite database.
 
 ## Run locally
@@ -256,6 +259,21 @@ index. Pending uploads are not visible as trusted records.
 The LLM uses a separate, overlapping text-chunk process for model context. LLM
 chunks are character slices; on-chain chunks are exact bytes and must not be
 interchanged.
+
+## Off-chain compliance processing
+
+After `TrustedPolicyRecordRegistered` is confirmed, the listener reconstructs
+and verifies the exact on-chain `rawFile`. An external adapter places it in an
+isolated temporary input directory and runs the unchanged directory-based P2 and
+P3 commands. The resulting JSON and Markdown files are written under
+`data/compliance-results/<recordKey>/`. The GPT API key is read locally from
+`data/gpt.zshrc`; that file can contain either the bare key or an
+`OPENAI_API_KEY=...` assignment and is ignored by Git.
+
+The listener defaults to the high-risk P3 checklist. Set
+`COMPLIANCE_HIGH_RISK=no` for the low-risk checklist. `COMPLIANCE_GPT_MODEL`,
+`COMPLIANCE_PYTHON_PATH`, `COMPLIANCE_OUTPUT_DIR`, and `GPT_CONFIG_PATH` can
+override the corresponding defaults.
 
 Solidity functions still use the `calldata` data-location keyword for external
 parameters. This is only an EVM input type: the application no longer treats
