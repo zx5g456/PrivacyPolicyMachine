@@ -33,7 +33,7 @@ const pythonExecutable =
   process.env.COMPLIANCE_PYTHON_PATH ??
   join(projectRoot, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const complianceModel = process.env.COMPLIANCE_GPT_MODEL ?? "gpt-4o-mini";
-const complianceHighRisk = process.env.COMPLIANCE_HIGH_RISK ?? "yes";
+const complianceHighRisk = process.env.COMPLIANCE_HIGH_RISK ?? "auto";
 let running = true;
 
 function runComplianceTool(label, script, args, rawFile) {
@@ -89,10 +89,10 @@ async function callOffchainTool({ detectedAt, recordKey }) {
   await mkdir(outputDirectory, { recursive: true });
 
   console.log(
-    `[${detectedAt}] running P2/P3 for ${record.serviceName} (${recordKey})`,
+    `[${detectedAt}] running P1/P2/P3 for ${record.serviceName} (${recordKey})`,
   );
   await runComplianceTool(
-    "P2/P3 compliance adapter",
+    "P1/P2/P3 compliance adapter",
     join(complianceRoot, "run_compliance.py"),
     [
       "--output-dir",

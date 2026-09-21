@@ -28,8 +28,9 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - `server/blockchain.py`: Web3 client for resumable chunk uploads, contract-storage reads, and independent content audits.
 - `contracts/TrustedPolicyRegistry.sol`: Solidity policy registry used by the web application.
 - `scripts/deploy-contract.js`: deploys the registry to the configured RPC network.
-- `offchain-listener/listener.js`: listens for successful on-chain policy registrations, reconstructs the registered raw file, and runs compliance P2/P3.
-- `compliance tool/run_compliance.py`: adapts one on-chain raw file to the original directory-based P2/P3 command interfaces.
+- `offchain-listener/listener.js`: listens for successful on-chain policy registrations, reconstructs the registered raw file, and runs compliance P1/P2/P3.
+- `compliance tool/run_compliance.py`: adapts one on-chain raw file to the directory-based P1/P2/P3 command interfaces.
+- `compliance tool/P1/high_risk_detection.py`: classifies the policy with the GPT API and selects the P3 checklist.
 - `compliance tool/P2/information_extract.py`: extracts policy information with the GPT API.
 - `compliance tool/P3/evaluate_checklist.py`: evaluates the extracted information against the compliance checklist.
 - `data/policies.db`: local SQLite database.
@@ -264,14 +265,15 @@ interchanged.
 
 After `TrustedPolicyRecordRegistered` is confirmed, the listener reconstructs
 and verifies the exact on-chain `rawFile`. An external adapter places it in an
-isolated temporary input directory and runs the unchanged directory-based P2 and
-P3 commands. The resulting JSON and Markdown files are written under
+isolated temporary input directory and runs the directory-based P1, P2, and P3
+commands. The resulting JSON and Markdown files are written under
 `data/compliance-results/<recordKey>/`. The GPT API key is read locally from
 `data/gpt.zshrc`; that file can contain either the bare key or an
 `OPENAI_API_KEY=...` assignment and is ignored by Git.
 
-The listener defaults to the high-risk P3 checklist. Set
-`COMPLIANCE_HIGH_RISK=no` for the low-risk checklist. `COMPLIANCE_GPT_MODEL`,
+The listener defaults to `COMPLIANCE_HIGH_RISK=auto`, so P1's classification
+selects the high- or low-risk P3 checklist. Set it to `yes` or `no` to override
+that selection. `COMPLIANCE_GPT_MODEL`,
 `COMPLIANCE_PYTHON_PATH`, `COMPLIANCE_OUTPUT_DIR`, and `GPT_CONFIG_PATH` can
 override the corresponding defaults.
 
