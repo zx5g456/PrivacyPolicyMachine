@@ -1,5 +1,13 @@
 import { defineConfig } from "hardhat/config";
 
 export default defineConfig({
-  solidity: "0.8.24",
+  solidity: {
+    version: "0.8.24",
+    settings: {
+      optimizer: {
+        enabled: true,
+        runs: 200,
+      },
+    },
+  },
 });

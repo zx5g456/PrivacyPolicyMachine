@@ -86,6 +86,7 @@ async function shutdown(exitCode = 0) {
 
 async function main() {
   const python = process.platform === "win32" ? ".venv\\Scripts\\python.exe" : ".venv/bin/python";
+  const complianceUploaderAccount = process.env.COMPLIANCE_UPLOADER_ACCOUNT ?? "1";
   await access(python).catch(() => {
     throw new Error(`Python virtual environment not found at ${python}. Create it and install requirements first.`);
   });
@@ -102,7 +103,14 @@ async function main() {
     "contract deployment",
     command("npm"),
     ["run", "contract:deploy"],
-    { capture: true, env: { ...process.env, RPC_URL: rpcUrl } },
+    {
+      capture: true,
+      env: {
+        ...process.env,
+        RPC_URL: rpcUrl,
+        COMPLIANCE_UPLOADER_ACCOUNT: complianceUploaderAccount,
+      },
+    },
   );
   const address = deployOutput.match(/TrustedPolicyRegistry deployed to:\s*(0x[a-fA-F0-9]{40})/)?.[1];
   if (!address) throw new Error("Could not read CONTRACT_ADDRESS from deployment output");
@@ -114,6 +122,7 @@ async function main() {
     RPC_URL: rpcUrl,
     CONTRACT_ADDRESS: address,
     CONTRACT_DEPLOYMENT_BLOCK: deploymentBlock,
+    COMPLIANCE_UPLOADER_ACCOUNT: complianceUploaderAccount,
   };
 
   console.log("Starting off-chain listener and web server...");

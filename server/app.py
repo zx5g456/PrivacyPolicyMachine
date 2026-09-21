@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .blockchain import OnChainData, TrustedPolicyRegistry
+from .compliance_bundle import read_compliance_bundle
 from .llm_client import DEFAULT_MODEL
 from .llm_models import (
     LLMConnectionError,
@@ -78,6 +79,13 @@ class AppHandler(BaseHTTPRequestHandler):
             elif parsed.path.startswith("/api/audit/"):
                 tx_hash = unquote(parsed.path.removeprefix("/api/audit/"))
                 self._json(registry.audit_registration(tx_hash))
+            elif parsed.path.startswith("/api/compliance/"):
+                resource = unquote(parsed.path.removeprefix("/api/compliance/"))
+                if resource.endswith("/download"):
+                    record_key = resource.removesuffix("/download")
+                    self._download_compliance_bundle(record_key)
+                else:
+                    self._compliance_detail(resource)
             else:
                 self._static(parsed.path)
         except Exception as exc:
@@ -683,6 +691,74 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def _compliance_detail(self, record_key: str) -> None:
+        status = registry.read_compliance_status(record_key)
+        if status["status"] != "finalized":
+            self._json({"compliance": status})
+            return
+
+        content, bundle, comparisons = self._verified_compliance_bundle(record_key)
+        files = [
+            {
+                **entry,
+                "content": bundle.files[entry["name"]].decode(
+                    "utf-8", errors="replace"
+                ),
+            }
+            for entry in bundle.manifest["files"]
+        ]
+        self._json(
+            {
+                "compliance": status,
+                "verified": True,
+                "comparisons": comparisons,
+                "manifest": bundle.manifest,
+                "files": files,
+                "downloadUrl": f"/api/compliance/{record_key}/download",
+            }
+        )
+
+    def _download_compliance_bundle(self, record_key: str) -> None:
+        content, _, _ = self._verified_compliance_bundle(record_key)
+        filename = f"compliance-{record_key.lower()}.zip"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{filename}"',
+        )
+        self.send_header("Content-Length", str(len(content.bundle)))
+        self.end_headers()
+        self.wfile.write(content.bundle)
+
+    def _verified_compliance_bundle(self, record_key: str) -> tuple[Any, Any, dict[str, bool]]:
+        content = registry.read_compliance_content(record_key)
+        bundle = read_compliance_bundle(content.bundle)
+        comparisons = {
+            "bundleHashMatchesContract": (
+                bundle.manifest["bundleHash"] == content.result.bundleHash
+            ),
+            "sourceDocumentHashMatchesContract": (
+                bundle.manifest["sourceDocumentHash"]
+                == content.result.sourceDocumentHash
+            ),
+            "pipelineVersionHashMatchesContract": (
+                bundle.manifest["pipelineVersionHash"]
+                == content.result.pipelineVersionHash
+            ),
+            "recordKeyMatchesContract": (
+                bundle.manifest["recordKey"].lower()
+                == content.result.recordKey.lower()
+            ),
+        }
+        failures = [name for name, valid in comparisons.items() if not valid]
+        if failures:
+            raise RuntimeError(
+                "Compliance manifest failed contract validation: "
+                + ", ".join(failures)
+            )
+        return content, bundle, comparisons
+
     def _json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
@@ -694,7 +770,9 @@ class AppHandler(BaseHTTPRequestHandler):
     def _chain_to_dict(self, record: Any) -> dict[str, Any] | None:
         if record is None:
             return None
-        return asdict(record)
+        payload = asdict(record)
+        payload["compliance"] = registry.read_compliance_status(record.recordKey)
+        return payload
 
     def _handle_error(self, exc: Exception) -> None:
         traceback.print_exc()

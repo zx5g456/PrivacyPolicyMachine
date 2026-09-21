@@ -472,6 +472,136 @@ button {
   padding: 12px;
 }
 
+.compliance-panel {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #cdded8;
+  border-radius: 7px;
+  background: #f7fbf9;
+  padding: 14px;
+}
+
+.compliance-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.compliance-heading h3,
+.compliance-heading p {
+  margin: 0;
+}
+
+.compliance-heading p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.compliance-status {
+  display: inline-block;
+  border: 1px solid #d9c9a7;
+  border-radius: 999px;
+  background: #fff8e8;
+  color: #835313;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.compliance-status.uploading {
+  border-color: #b9d0e8;
+  background: #eff6fc;
+  color: #265f92;
+}
+
+.compliance-status.finalized {
+  border-color: #b7d7cd;
+  background: #ecf7f2;
+  color: #11614f;
+}
+
+.compliance-content {
+  color: #3b4757;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.compliance-audit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin: 0;
+}
+
+.compliance-audit-grid div {
+  min-width: 0;
+  border: 1px solid #dce7e2;
+  border-radius: 6px;
+  background: #fff;
+  padding: 9px;
+}
+
+.compliance-audit-grid dt,
+.compliance-audit-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.compliance-audit-grid dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.compliance-audit-grid dd {
+  margin-top: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
+.compliance-download {
+  display: inline-flex;
+  margin-top: 12px;
+  border: 1px solid var(--blue);
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: var(--blue);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.compliance-files {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.compliance-files details {
+  border: 1px solid #dce7e2;
+  border-radius: 6px;
+  background: #fff;
+  padding: 9px;
+}
+
+.compliance-files summary {
+  cursor: pointer;
+  color: var(--blue);
+  font-weight: 800;
+}
+
+.compliance-files pre {
+  max-height: 420px;
+  margin: 10px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.compliance-error {
+  color: var(--red);
+}
+
 .raw-preview-heading {
   display: flex;
   align-items: center;
@@ -729,6 +859,7 @@ button {
   }
 
   .metadata-grid-detail,
+  .compliance-audit-grid,
   .metadata-group dl div,
   .policy-detail-header {
     grid-template-columns: 1fr;

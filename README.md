@@ -266,16 +266,38 @@ interchanged.
 After `TrustedPolicyRecordRegistered` is confirmed, the listener reconstructs
 and verifies the exact on-chain `rawFile`. An external adapter places it in an
 isolated temporary input directory and runs the directory-based P1, P2, and P3
-commands. The resulting JSON and Markdown files are written under
-`data/compliance-results/<recordKey>/`. The GPT API key is read locally from
+commands. The local result directory is:
+
+```text
+data/compliance-results/<recordKey>/
+├── p1-risk.json
+├── p2-extraction.json
+├── p3-checklist.json
+├── p3-checklist.md
+├── compliance-manifest.json
+├── compliance-bundle.zip
+└── onchain-receipt.json
+```
+
+The deterministic ZIP contains the four complete P1/P2/P3 files. The listener
+uploads that ZIP to the contract in resumable chunks, finalizes the one allowed
+compliance result for the policy record, reconstructs it from contract storage,
+and verifies its SHA-256 and ordered chunk commitment. If chain upload fails,
+the next attempt reuses the local bundle without calling GPT again. If a
+finalized result is replayed with no local files, the listener restores the
+local files from the on-chain ZIP.
+
+The GPT API key is read locally from
 `data/gpt.zshrc`; that file can contain either the bare key or an
 `OPENAI_API_KEY=...` assignment and is ignored by Git.
 
 The listener defaults to `COMPLIANCE_HIGH_RISK=auto`, so P1's classification
 selects the high- or low-risk P3 checklist. Set it to `yes` or `no` to override
-that selection. `COMPLIANCE_GPT_MODEL`,
-`COMPLIANCE_PYTHON_PATH`, `COMPLIANCE_OUTPUT_DIR`, and `GPT_CONFIG_PATH` can
-override the corresponding defaults.
+that selection. `npm run dev` uses Hardhat account 1 as the dedicated,
+contract-authorized compliance uploader. `COMPLIANCE_UPLOADER_ACCOUNT`,
+`COMPLIANCE_GPT_MODEL`, `COMPLIANCE_PYTHON_PATH`, `COMPLIANCE_OUTPUT_DIR`,
+`COMPLIANCE_CHUNK_BYTES`, `COMPLIANCE_MAX_BUNDLE_BYTES`, and `GPT_CONFIG_PATH`
+can override the corresponding defaults. The default bundle limit is 1 MiB.
 
 Solidity functions still use the `calldata` data-location keyword for external
 parameters. This is only an EVM input type: the application no longer treats
@@ -339,7 +361,7 @@ Contract storage is public. Do not register secrets or personal information that
 should not be publicly recoverable. A restarted `npm run dev` creates a new
 ephemeral Hardhat chain, so durable third-party audit requires a persistent L2.
 
-## Off-chain Event Listener (Experimental)
+## Off-chain Event Listener
 
 Every successful `finalizePolicyRegistration` transaction emits the contract's
 `TrustedPolicyRecordRegistered` event. Its indexed `recordKey` is the unique
@@ -357,16 +379,17 @@ CONTRACT_ADDRESS=0xYourDeployedContractAddress \
 npm start
 ```
 
-When a policy is registered, the listener currently prints the UTC detection
-time and ID:
+When a policy is registered, the listener prints the UTC detection time,
+runs P1/P2/P3, and uploads the verified result bundle:
 
 ```text
-[2026-08-17T02:30:45.123Z] policyId=0x...
+[2026-09-21T02:30:45.123Z] processing compliance for Example (0x...)
+[2026-09-21T02:30:45.123Z] compliance bundle finalized for 0x...
 ```
 
-Replace the body of `callOffchainTool` in `listener.js` with the real tool call
-when the tool is available. The listener uses provider polling, so both local
-and hosted HTTP JSON-RPC endpoints work.
+The listener uses provider polling. The uploader must be authorized by the
+contract owner. For manual local startup, either use the deployer account or set
+the same `COMPLIANCE_UPLOADER_ACCOUNT` when deploying and running the listener.
 
 ### Complete web-to-contract event test
 
@@ -409,6 +432,9 @@ export CONTRACT_DEPLOYMENT_BLOCK=1
 Terminal 4 — open the URL printed by the server and create or update a policy.
 The API response includes its finalization transaction, chunk transaction list,
 and block data. At the same time,
-Terminal 2 prints the event detection time and the same on-chain policy ID.
+Terminal 2 prints the event detection time, pipeline output, chunk upload, and
+the same on-chain policy ID. The Records page shows pending/uploading/finalized
+status, verifies the chain bundle, displays all four files, and downloads the
+complete ZIP.
 Restarting the Hardhat node creates a fresh chain, so deploy the contract again
 and use its new address after every restart.

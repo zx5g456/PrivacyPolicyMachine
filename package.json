@@ -7,7 +7,8 @@
     "dev": "node scripts/start-local.js",
     "chain": "hardhat node",
     "contract:compile": "hardhat compile",
-    "contract:deploy": "node scripts/deploy-contract.js"
+    "contract:deploy": "node scripts/deploy-contract.js",
+    "contract:test-compliance": "node scripts/test-compliance-contract.js"
   },
   "devDependencies": {
     "ethers": "^6.16.0",

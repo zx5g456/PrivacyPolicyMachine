@@ -3,6 +3,9 @@ pragma solidity ^0.8.24;
 
 contract TrustedPolicyRegistry {
     uint256 public constant MAX_CHUNK_BYTES = 24 * 1024;
+    address public immutable owner;
+
+    mapping(address => bool) public complianceUploaders;
 
     struct RegistrationManifest {
         bytes32 documentHash;
@@ -53,6 +56,36 @@ contract TrustedPolicyRegistry {
         bool hasPreviousReference;
     }
 
+    struct ComplianceManifest {
+        bytes32 bundleHash;
+        bytes32 sourceDocumentHash;
+        bytes32 pipelineVersionHash;
+        uint64 bundleSize;
+    }
+
+    struct PendingComplianceUpload {
+        bytes32 bundleHash;
+        bytes32 sourceDocumentHash;
+        bytes32 pipelineVersionHash;
+        bytes32 chunkCommitment;
+        uint64 bundleSize;
+        uint64 bytesStored;
+        uint32 chunkCount;
+        address submitter;
+        bool active;
+    }
+
+    struct ComplianceResult {
+        bytes32 bundleHash;
+        bytes32 sourceDocumentHash;
+        bytes32 pipelineVersionHash;
+        bytes32 chunkCommitment;
+        uint64 bundleSize;
+        uint32 chunkCount;
+        address submitter;
+        uint64 registeredAt;
+    }
+
     mapping(bytes32 => TrustedPolicyRecord) private records;
     mapping(bytes32 => PendingUpload) private pendingUploads;
     mapping(bytes32 => mapping(uint32 => bytes)) private documentChunks;
@@ -60,6 +93,10 @@ contract TrustedPolicyRegistry {
     mapping(bytes32 => bool) private exists;
     mapping(bytes32 => bytes32) private latestRecordKeyByPolicy;
     mapping(bytes32 => bytes32[]) private recordKeysByPolicy;
+    mapping(bytes32 => ComplianceResult) private complianceResults;
+    mapping(bytes32 => PendingComplianceUpload) private pendingComplianceUploads;
+    mapping(bytes32 => mapping(uint32 => bytes)) private complianceChunks;
+    mapping(bytes32 => bool) private complianceExists;
 
     event PolicyUploadStarted(
         bytes32 indexed recordKey,
@@ -89,6 +126,54 @@ contract TrustedPolicyRegistry {
         address registrant,
         uint64 registeredAt
     );
+
+    event ComplianceUploaderUpdated(address indexed uploader, bool authorized);
+
+    event ComplianceUploadStarted(
+        bytes32 indexed recordKey,
+        bytes32 indexed bundleHash,
+        address indexed submitter,
+        uint64 bundleSize
+    );
+
+    event ComplianceChunkStored(
+        bytes32 indexed recordKey,
+        uint32 indexed chunkIndex,
+        bytes32 chunkHash,
+        uint64 chunkSize,
+        bytes32 chunkCommitment
+    );
+
+    event ComplianceUploadCancelled(bytes32 indexed recordKey, address indexed submitter);
+
+    event ComplianceResultRegistered(
+        bytes32 indexed recordKey,
+        bytes32 indexed bundleHash,
+        address indexed submitter,
+        uint64 registeredAt
+    );
+
+    constructor() {
+        owner = msg.sender;
+        complianceUploaders[msg.sender] = true;
+        emit ComplianceUploaderUpdated(msg.sender, true);
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only the owner can perform this action");
+        _;
+    }
+
+    modifier onlyComplianceUploader() {
+        require(complianceUploaders[msg.sender], "Not an authorized compliance uploader");
+        _;
+    }
+
+    function setComplianceUploader(address uploader, bool authorized) external onlyOwner {
+        require(uploader != address(0), "Uploader is required");
+        complianceUploaders[uploader] = authorized;
+        emit ComplianceUploaderUpdated(uploader, authorized);
+    }
 
     function beginPolicyRegistration(RegistrationManifest calldata manifest)
         external returns (bytes32 recordKey)
@@ -222,6 +307,99 @@ contract TrustedPolicyRegistry {
         emit PolicyUploadCancelled(recordKey, registrant);
     }
 
+    function beginComplianceUpload(bytes32 recordKey, ComplianceManifest calldata manifest)
+        external onlyComplianceUploader
+    {
+        require(exists[recordKey], "Policy record not found");
+        require(!complianceExists[recordKey], "Compliance result already exists");
+        require(!pendingComplianceUploads[recordKey].active, "Compliance upload already started");
+        require(manifest.bundleHash != bytes32(0), "bundleHash is required");
+        require(manifest.pipelineVersionHash != bytes32(0), "pipelineVersionHash is required");
+        require(manifest.bundleSize > 0, "bundleSize is required");
+        require(
+            manifest.sourceDocumentHash == records[recordKey].documentHash,
+            "Compliance source document does not match policy"
+        );
+
+        PendingComplianceUpload storage pending = pendingComplianceUploads[recordKey];
+        pending.bundleHash = manifest.bundleHash;
+        pending.sourceDocumentHash = manifest.sourceDocumentHash;
+        pending.pipelineVersionHash = manifest.pipelineVersionHash;
+        pending.bundleSize = manifest.bundleSize;
+        pending.submitter = msg.sender;
+        pending.active = true;
+
+        emit ComplianceUploadStarted(recordKey, manifest.bundleHash, msg.sender, manifest.bundleSize);
+    }
+
+    function appendComplianceChunk(bytes32 recordKey, uint32 chunkIndex, bytes calldata chunk)
+        external onlyComplianceUploader
+    {
+        PendingComplianceUpload storage pending = _ownedPendingComplianceUpload(recordKey);
+        require(chunkIndex == pending.chunkCount, "Unexpected compliance chunk index");
+        require(
+            uint256(pending.bytesStored) + chunk.length <= pending.bundleSize,
+            "Compliance bundle exceeds declared size"
+        );
+
+        complianceChunks[recordKey][chunkIndex] = chunk;
+        bytes32 chunkHash = sha256(chunk);
+        pending.chunkCommitment = _nextChunkCommitment(
+            pending.chunkCommitment, chunkIndex, uint64(chunk.length), chunkHash
+        );
+        pending.bytesStored += uint64(chunk.length);
+        pending.chunkCount += 1;
+
+        emit ComplianceChunkStored(
+            recordKey,
+            chunkIndex,
+            chunkHash,
+            uint64(chunk.length),
+            pending.chunkCommitment
+        );
+    }
+
+    function finalizeComplianceUpload(bytes32 recordKey) external onlyComplianceUploader {
+        PendingComplianceUpload storage pending = _ownedPendingComplianceUpload(recordKey);
+        require(!complianceExists[recordKey], "Compliance result already exists");
+        require(pending.bytesStored == pending.bundleSize, "Compliance upload is incomplete");
+        require(pending.chunkCount > 0, "Compliance chunks are required");
+
+        uint64 registeredAt = uint64(block.timestamp);
+        complianceResults[recordKey] = ComplianceResult({
+            bundleHash: pending.bundleHash,
+            sourceDocumentHash: pending.sourceDocumentHash,
+            pipelineVersionHash: pending.pipelineVersionHash,
+            chunkCommitment: pending.chunkCommitment,
+            bundleSize: pending.bundleSize,
+            chunkCount: pending.chunkCount,
+            submitter: pending.submitter,
+            registeredAt: registeredAt
+        });
+        complianceExists[recordKey] = true;
+
+        emit ComplianceResultRegistered(
+            recordKey,
+            pending.bundleHash,
+            pending.submitter,
+            registeredAt
+        );
+
+        delete pendingComplianceUploads[recordKey];
+    }
+
+    function cancelComplianceUpload(bytes32 recordKey) external {
+        PendingComplianceUpload storage pending = pendingComplianceUploads[recordKey];
+        require(pending.active, "Compliance upload not found");
+        require(
+            pending.submitter == msg.sender || msg.sender == owner,
+            "Only the submitter or owner can cancel this upload"
+        );
+        address submitter = pending.submitter;
+        delete pendingComplianceUploads[recordKey];
+        emit ComplianceUploadCancelled(recordKey, submitter);
+    }
+
     function hasPendingUpload(bytes32 recordKey) external view returns (bool) {
         return pendingUploads[recordKey].active;
     }
@@ -230,9 +408,43 @@ contract TrustedPolicyRegistry {
         return exists[recordKey];
     }
 
+    function hasComplianceResult(bytes32 recordKey) external view returns (bool) {
+        return complianceExists[recordKey];
+    }
+
+    function hasPendingComplianceUpload(bytes32 recordKey) external view returns (bool) {
+        return pendingComplianceUploads[recordKey].active;
+    }
+
     function readUploadProgress(bytes32 recordKey) external view returns (PendingUpload memory) {
         require(pendingUploads[recordKey].active, "Policy upload not found");
         return pendingUploads[recordKey];
+    }
+
+    function readComplianceUploadProgress(bytes32 recordKey)
+        external view returns (PendingComplianceUpload memory)
+    {
+        require(pendingComplianceUploads[recordKey].active, "Compliance upload not found");
+        return pendingComplianceUploads[recordKey];
+    }
+
+    function readComplianceResult(bytes32 recordKey) external view returns (ComplianceResult memory) {
+        require(complianceExists[recordKey], "Compliance result not found");
+        return complianceResults[recordKey];
+    }
+
+    function readComplianceChunk(bytes32 recordKey, uint32 chunkIndex)
+        external view returns (bytes memory)
+    {
+        require(
+            complianceExists[recordKey] || pendingComplianceUploads[recordKey].active,
+            "Compliance content not found"
+        );
+        uint32 chunkCount = complianceExists[recordKey]
+            ? complianceResults[recordKey].chunkCount
+            : pendingComplianceUploads[recordKey].chunkCount;
+        require(chunkIndex < chunkCount, "Compliance chunk not found");
+        return complianceChunks[recordKey][chunkIndex];
     }
 
     function readDocumentChunk(bytes32 recordKey, uint32 chunkIndex) external view returns (bytes memory) {
@@ -303,6 +515,14 @@ contract TrustedPolicyRegistry {
         pending = pendingUploads[recordKey];
         require(pending.active, "Policy upload not found");
         require(pending.registrant == msg.sender, "Only the registrant can modify this upload");
+    }
+
+    function _ownedPendingComplianceUpload(bytes32 recordKey)
+        private view returns (PendingComplianceUpload storage pending)
+    {
+        pending = pendingComplianceUploads[recordKey];
+        require(pending.active, "Compliance upload not found");
+        require(pending.submitter == msg.sender, "Only the submitter can modify this upload");
     }
 
     function _requireReadableChunk(bytes32 recordKey) private view {

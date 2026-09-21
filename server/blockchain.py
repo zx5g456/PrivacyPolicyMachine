@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -123,6 +123,34 @@ class OnChainContent:
     @property
     def metadata_commitment(self) -> str:
         return Web3.to_hex(content_commitment(list(self.metadataChunks)))
+
+
+@dataclass(frozen=True)
+class ComplianceResult:
+    recordKey: str
+    bundleHash: str
+    sourceDocumentHash: str
+    pipelineVersionHash: str
+    chunkCommitment: str
+    bundleSize: int
+    chunkCount: int
+    submitter: str
+    registeredAt: int
+
+
+@dataclass(frozen=True)
+class OnChainComplianceContent:
+    result: ComplianceResult
+    bundle: bytes
+    chunks: tuple[bytes, ...]
+
+    @property
+    def bundle_hash(self) -> str:
+        return "0x" + hashlib.sha256(self.bundle).hexdigest()
+
+    @property
+    def chunk_commitment(self) -> str:
+        return Web3.to_hex(content_commitment(list(self.chunks)))
 
 
 @dataclass(frozen=True)
@@ -285,6 +313,64 @@ class TrustedPolicyRegistry:
             documentChunks=document_chunks,
             metadataChunks=metadata_chunks,
         )
+
+    def read_compliance_status(self, record_key: str | bytes) -> dict[str, Any]:
+        """Return lightweight compliance state without downloading the result bundle."""
+        self._require_connection()
+        key = self._record_key_bytes(record_key)
+        if self.contract.functions.hasComplianceResult(key).call():
+            result = self._compliance_result_from_contract(
+                key,
+                self.contract.functions.readComplianceResult(key).call(),
+            )
+            return {"status": "finalized", **asdict(result)}
+        if self.contract.functions.hasPendingComplianceUpload(key).call():
+            pending = self.contract.functions.readComplianceUploadProgress(key).call()
+            return {
+                "status": "uploading",
+                "recordKey": Web3.to_hex(key),
+                "bundleHash": Web3.to_hex(pending[0]),
+                "sourceDocumentHash": Web3.to_hex(pending[1]),
+                "pipelineVersionHash": Web3.to_hex(pending[2]),
+                "chunkCommitment": Web3.to_hex(pending[3]),
+                "bundleSize": int(pending[4]),
+                "bytesStored": int(pending[5]),
+                "chunkCount": int(pending[6]),
+                "submitter": pending[7],
+            }
+        return {"status": "pending", "recordKey": Web3.to_hex(key)}
+
+    def read_compliance_content(
+        self, record_key: str | bytes
+    ) -> OnChainComplianceContent:
+        """Download and verify the one finalized compliance bundle for a policy."""
+        self._require_connection()
+        key = self._record_key_bytes(record_key)
+        result = self._compliance_result_from_contract(
+            key,
+            self.contract.functions.readComplianceResult(key).call(),
+        )
+        chunks = tuple(
+            bytes(self.contract.functions.readComplianceChunk(key, index).call())
+            for index in range(result.chunkCount)
+        )
+        content = OnChainComplianceContent(
+            result=result,
+            bundle=b"".join(chunks),
+            chunks=chunks,
+        )
+        comparisons = {
+            "bundle hash": content.bundle_hash == result.bundleHash,
+            "bundle size": len(content.bundle) == result.bundleSize,
+            "chunk count": len(content.chunks) == result.chunkCount,
+            "chunk commitment": content.chunk_commitment == result.chunkCommitment,
+        }
+        failures = [name for name, valid in comparisons.items() if not valid]
+        if failures:
+            raise RuntimeError(
+                "Stored compliance bundle failed validation: " + ", ".join(failures)
+            )
+        return content
 
     def list_records(self) -> list[ChainRecord]:
         self._require_connection()
@@ -707,6 +793,21 @@ class TrustedPolicyRegistry:
         if len(value) != 32:
             raise ValueError("recordKey must be exactly 32 bytes")
         return value
+
+    def _compliance_result_from_contract(
+        self, record_key: bytes, result: Any
+    ) -> ComplianceResult:
+        return ComplianceResult(
+            recordKey=Web3.to_hex(record_key),
+            bundleHash=Web3.to_hex(result[0]),
+            sourceDocumentHash=Web3.to_hex(result[1]),
+            pipelineVersionHash=Web3.to_hex(result[2]),
+            chunkCommitment=Web3.to_hex(result[3]),
+            bundleSize=int(result[4]),
+            chunkCount=int(result[5]),
+            submitter=result[6],
+            registeredAt=int(result[7]),
+        )
 
     def _record_from_event(
         self,

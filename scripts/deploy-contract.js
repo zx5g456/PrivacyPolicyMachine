@@ -27,6 +27,20 @@ await registry.waitForDeployment();
 const contractAddress = await registry.getAddress();
 const deploymentTransaction = registry.deploymentTransaction();
 const deploymentReceipt = await deploymentTransaction.wait();
+const configuredComplianceUploader = process.env.COMPLIANCE_UPLOADER_ACCOUNT;
+const complianceUploaderAddress = configuredComplianceUploader
+  ? /^\d+$/.test(configuredComplianceUploader)
+    ? await (await provider.getSigner(Number.parseInt(configuredComplianceUploader, 10))).getAddress()
+    : configuredComplianceUploader
+  : await signer.getAddress();
+if (complianceUploaderAddress.toLowerCase() !== (await signer.getAddress()).toLowerCase()) {
+  const authorization = await registry.setComplianceUploader(
+    complianceUploaderAddress,
+    true,
+  );
+  await authorization.wait();
+  console.log(`Authorized compliance uploader: ${complianceUploaderAddress}`);
+}
 
 console.log(`TrustedPolicyRegistry deployed to: ${contractAddress}`);
 console.log("Use these values in the other terminals:");

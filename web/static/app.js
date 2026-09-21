@@ -516,6 +516,10 @@ async function loadRecords(applicationName = "") {
       const version = policy.policyVersion || "unversioned";
       const name = displayPolicyName(policy);
       const metadata = displayMetadataForPolicy(policy);
+      const onChain = findOnChainRecord(policy);
+      const complianceStatus = onChain && onChain.compliance
+        ? onChain.compliance.status
+        : "pending";
       return `<article class="record-card">
         <h3>${escapeHtml(name)}</h3>
         <p>Policy ID: ${escapeHtml(policy.policyId)}</p>
@@ -524,6 +528,7 @@ async function loadRecords(applicationName = "") {
         <p>Uploaded: ${escapeHtml(version)}</p>
         <p>Hash: ${escapeHtml(shorten(policy.hashCode))}</p>
         <p>Tx: ${escapeHtml(shorten(policy.txHash))}</p>
+        <p>Compliance: <span class="compliance-status ${escapeHtml(complianceStatus)}">${escapeHtml(complianceStatusLabel(complianceStatus))}</span></p>
         <p>Created: ${escapeHtml(policy.createdAt)}</p>
         ${renderMetadataSummaryHtml(metadata)}
         <button
@@ -583,12 +588,14 @@ function renderQueryFullText(policy) {
   const onChain = findOnChainRecord(policy);
   const onChainData = displayMetadataForPolicy(policy);
   queryFullText.innerHTML = renderPolicyDetailHtml(policy, onChain, onChainData);
+  void hydrateCompliancePanel(queryFullText, onChain);
 }
 
 function renderRecordDetail(policy) {
   const onChain = findOnChainRecord(policy);
   const onChainData = displayMetadataForPolicy(policy);
   recordsDetail.innerHTML = renderPolicyDetailHtml(policy, onChain, onChainData);
+  void hydrateCompliancePanel(recordsDetail, onChain);
 }
 
 function currentDeveloper() {
@@ -769,6 +776,8 @@ function renderPolicyDetailHtml(policy, onChain, data) {
         ${metadataGroups(data).map(([title, rows]) => renderMetadataGroupHtml(title, rows)).join("")}
       </div>
 
+      ${renderCompliancePanelHtml(onChain)}
+
       <section class="raw-preview">
         <div class="raw-preview-heading">
           <h3>Raw Policy Preview</h3>
@@ -782,6 +791,77 @@ function renderPolicyDetailHtml(policy, onChain, data) {
       </section>
     </section>
   `;
+}
+
+function renderCompliancePanelHtml(onChain) {
+  const compliance = onChain && onChain.compliance
+    ? onChain.compliance
+    : { status: "pending" };
+  const status = compliance.status || "pending";
+  const progress = status === "uploading"
+    ? `${compliance.bytesStored || 0} / ${compliance.bundleSize || 0} bytes`
+    : status === "finalized"
+      ? `${compliance.bundleSize || 0} bytes in ${compliance.chunkCount || 0} chunk(s)`
+      : "Waiting for the off-chain P1/P2/P3 pipeline";
+  return `<section class="compliance-panel">
+    <div class="compliance-heading">
+      <div>
+        <h3>On-chain Compliance Result</h3>
+        <p>${escapeHtml(progress)}</p>
+      </div>
+      <span class="compliance-status ${escapeHtml(status)}">${escapeHtml(complianceStatusLabel(status))}</span>
+    </div>
+    <div class="compliance-content" data-compliance-content>
+      ${status === "finalized"
+        ? "Downloading and verifying the on-chain bundle..."
+        : status === "uploading"
+          ? "The local result is complete and its chunks are being uploaded."
+          : "The result will appear after P1, P2, and P3 finish."}
+    </div>
+  </section>`;
+}
+
+async function hydrateCompliancePanel(container, onChain) {
+  const target = container.querySelector("[data-compliance-content]");
+  const compliance = onChain && onChain.compliance;
+  if (!target || !onChain || !compliance || compliance.status !== "finalized") {
+    return;
+  }
+  try {
+    const response = await fetch(`/api/compliance/${encodeURIComponent(onChain.recordKey)}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Could not load the compliance result");
+    }
+    const manifest = payload.manifest || {};
+    const files = payload.files || [];
+    target.innerHTML = `
+      <dl class="compliance-audit-grid">
+        <div><dt>Verified</dt><dd>${payload.verified ? "yes" : "no"}</dd></div>
+        <div><dt>Bundle hash</dt><dd>${escapeHtml(manifest.bundleHash || "")}</dd></div>
+        <div><dt>Pipeline</dt><dd>${escapeHtml(manifest.pipelineVersion || "")}</dd></div>
+        <div><dt>Model</dt><dd>${escapeHtml(manifest.model || "")}</dd></div>
+        <div><dt>P3 mode</dt><dd>${escapeHtml(manifest.p3Mode || "")}</dd></div>
+        <div><dt>Uploader</dt><dd>${escapeHtml(compliance.submitter || "")}</dd></div>
+      </dl>
+      <a class="compliance-download" href="${escapeHtml(payload.downloadUrl || "")}" download>Download verified result bundle</a>
+      <div class="compliance-files">
+        ${files.map((file) => `<details>
+          <summary>${escapeHtml(file.name)} · ${escapeHtml(String(file.size))} bytes</summary>
+          <pre>${escapeHtml(file.content || "")}</pre>
+        </details>`).join("")}
+      </div>
+    `;
+  } catch (error) {
+    target.textContent = formatError(error);
+    target.classList.add("compliance-error");
+  }
+}
+
+function complianceStatusLabel(status) {
+  if (status === "finalized") return "Finalized on chain";
+  if (status === "uploading") return "Uploading";
+  return "Pending analysis";
 }
 
 function renderMetadataGroupHtml(title, rows) {
