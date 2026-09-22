@@ -8,7 +8,8 @@
     "chain": "hardhat node",
     "contract:compile": "hardhat compile",
     "contract:deploy": "node scripts/deploy-contract.js",
-    "contract:test-compliance": "node scripts/test-compliance-contract.js"
+    "contract:test-compliance": "node scripts/test-compliance-contract.js",
+    "test:rq1": "npm run contract:compile && node scripts/test-rq1.js"
   },
   "devDependencies": {
     "ethers": "^6.16.0",

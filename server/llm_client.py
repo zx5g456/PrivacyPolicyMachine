@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from typing import Any, Protocol
 from urllib import error, request
@@ -36,8 +37,8 @@ class ChatClient(Protocol):
 class OllamaChatClient:
     """Minimal Ollama HTTP client using only Python's standard library."""
 
-    def __init__(self, url: str = OLLAMA_CHAT_URL) -> None:
-        self.url = url
+    def __init__(self, url: str | None = None) -> None:
+        self.url = url or os.environ.get("OLLAMA_CHAT_URL", OLLAMA_CHAT_URL)
 
     def chat(self, *, model: str, prompt: str, schema: dict[str, Any], timeout: float) -> str:
         payload = {
@@ -70,7 +71,7 @@ class OllamaChatClient:
             raise LLMResponseError(message) from exc
         except (error.URLError, ConnectionError, OSError) as exc:
             raise LLMConnectionError(
-                "Cannot connect to Ollama at 127.0.0.1:11434; start Ollama and pull the configured model"
+                f"Cannot connect to Ollama at {self.url}; start Ollama and pull the configured model"
             ) from exc
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LLMResponseError("Ollama returned a non-JSON HTTP response") from exc

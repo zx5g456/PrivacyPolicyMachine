@@ -1,0 +1,7 @@
+RQ1 XR Sample Privacy Policy Version One
+
+We collect precise location data during service use to provide the XR experience.
+We share data with our cloud provider only to deliver the service.
+We retain account records for seven years.
+You can contact privacy@example.test to request deletion of your account data.
+We encrypt personal data in transit and at rest.

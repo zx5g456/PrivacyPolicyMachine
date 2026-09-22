@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import mimetypes
 import os
+import secrets
 import socket
 import sys
 import traceback
@@ -31,18 +34,23 @@ from .processor import (
     RISK_FLAG_DETAILS,
     STATUS_METADATA_FIELDS,
     canonical_metadata_bytes,
+    canonical_on_chain_metadata_bytes,
     generate_report,
     hash_policy_bytes,
     normalize_policy_text,
+    registered_metadata_match,
     require_canonical_metadata_keys,
 )
+from .review import apply_human_review
 from .storage import PolicyStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 STATIC_DIR = ROOT / "web" / "static"
-store = PolicyStore(DATA_DIR / "policies.db")
+POLICY_DB_PATH = Path(os.environ.get("POLICY_DB_PATH", DATA_DIR / "policies.db"))
+REVIEW_SIGNING_KEY = os.environ.get("REVIEW_SIGNING_KEY", "").encode("utf-8") or secrets.token_bytes(32)
+store = PolicyStore(POLICY_DB_PATH)
 registry = TrustedPolicyRegistry(
     ROOT / "artifacts" / "contracts" / "TrustedPolicyRegistry.sol" / "TrustedPolicyRegistry.json"
 )
@@ -194,7 +202,7 @@ class AppHandler(BaseHTTPRequestHandler):
         metadata["uploadMethod"] = "ai"
         metadata.setdefault("permittedUsage", [])
         metadata.setdefault("metadataDetails", {})
-        metadata_bytes = canonical_metadata_bytes(metadata)
+        metadata_bytes = canonical_on_chain_metadata_bytes(metadata)
         metadata_hash = hash_policy_bytes(metadata_bytes)
         report = generate_report(metadata, hash_code)
         chain_record = registry.register_trusted_policy_record(
@@ -272,12 +280,53 @@ class AppHandler(BaseHTTPRequestHandler):
     def _reviewed_metadata(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             metadata = json.loads(self._required(payload, "metadataJson"))
+            original_text = self._required(payload, "originalMetadataJson")
+            original_metadata = json.loads(original_text)
         except json.JSONDecodeError as exc:
-            raise ValueError("metadataJson must contain valid JSON") from exc
+            raise ValueError(
+                "metadataJson and originalMetadataJson must contain valid JSON"
+            ) from exc
         if not isinstance(metadata, dict) or not isinstance(metadata.get("metadataEvidence"), dict):
             raise ValueError("metadataJson must contain the reviewed policy metadata")
+        if not isinstance(original_metadata, dict) or not isinstance(
+            original_metadata.get("metadataEvidence"), dict
+        ):
+            raise ValueError(
+                "originalMetadataJson must contain the original AI metadata"
+            )
+        require_canonical_metadata_keys(original_metadata)
+        supplied_token = self._required(payload, "reviewToken")
+        expected_token = self._review_token(original_metadata)
+        if not hmac.compare_digest(supplied_token, expected_token):
+            raise ValueError("Original AI review draft signature is invalid")
+        for key in ("policyId", "policyVersion"):
+            if metadata.get(key) != original_metadata.get(key):
+                raise ValueError(f"Reviewed metadata cannot change {key}")
+        if (
+            self._application_name(payload) != original_metadata.get("applicationName")
+            or self._developer_name(payload) != original_metadata.get("developer")
+        ):
+            raise ValueError("Review draft does not match the application or developer")
+        raw_file = self._raw_file(payload, required=True)
+        if original_metadata.get("documentHash") != hash_policy_bytes(
+            self._raw_file_bytes(payload, raw_file)
+        ):
+            raise ValueError("Review draft does not match the uploaded policy file")
         self._normalize_reviewed_metadata(metadata)
-        return metadata
+        for field_name in (*LIST_METADATA_FIELDS, *STATUS_METADATA_FIELDS):
+            for quote in self._evidence_lines(metadata["metadataEvidence"].get(field_name)):
+                if quote not in raw_file:
+                    raise ValueError(
+                        f"Reviewed evidence for {field_name} is not an exact quotation from the policy"
+                    )
+        return apply_human_review(metadata, original_metadata)
+
+    def _review_token(self, metadata: dict[str, Any]) -> str:
+        return hmac.new(
+            REVIEW_SIGNING_KEY,
+            canonical_metadata_bytes(metadata),
+            hashlib.sha256,
+        ).hexdigest()
 
     def _review_registration_identity(self, metadata: dict[str, Any]) -> tuple[str, str]:
         policy_id = metadata.get("policyId")
@@ -434,9 +483,12 @@ class AppHandler(BaseHTTPRequestHandler):
         expected_hash = stored["hashCode"]
         normalized_submitted = normalize_policy_text(submitted_raw)
         normalized_stored = normalize_policy_text(stored["rawFile"])
-        stored_metadata_hash = hash_policy_bytes(canonical_metadata_bytes(stored["metadata"]))
         audit = registry.audit_registration(stored["recordKey"])
         on_chain_content = registry.read_on_chain_content(stored["recordKey"])
+        metadata_storage_mode, expected_metadata = registered_metadata_match(
+            on_chain_content.metadataJson, stored["metadata"]
+        )
+        stored_metadata_hash = hash_policy_bytes(expected_metadata)
         comparisons = {
             "submittedTextMatchesSql": normalized_submitted == normalized_stored,
             "submittedHashMatchesSql": submitted_hash == expected_hash,
@@ -446,6 +498,7 @@ class AppHandler(BaseHTTPRequestHandler):
             "sqlDocumentHashMatchesChain": "0x" + expected_hash == chain_record.data.documentHash,
             "sqlMetadataHashMatchesChain": "0x" + stored_metadata_hash == chain_record.data.metadataHash,
             "storedMetadataHashMatchesSql": stored.get("metadataHash", "") == stored_metadata_hash,
+            "onChainMetadataMatchesSql": metadata_storage_mode != "mismatch",
             "onChainDocumentHashValid": audit["checks"]["documentHashMatchesStoredContent"],
             "onChainMetadataHashValid": audit["checks"]["metadataHashMatchesStoredContent"],
             "onChainDocumentCommitmentValid": audit["checks"]["documentCommitmentMatchesStorage"],
@@ -468,6 +521,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "submittedHash": submitted_hash,
                 "sqlHash": expected_hash,
                 "exactHashesMatch": submitted_hash == expected_hash,
+                "metadataStorageMode": metadata_storage_mode,
                 "audit": audit,
                 "normalization": "case, whitespace, and punctuation ignored",
                 "stored": stored,
@@ -534,6 +588,7 @@ class AppHandler(BaseHTTPRequestHandler):
             {
                 "analysis": analysis.model_dump(),
                 "metadata": metadata,
+                "reviewToken": self._review_token(metadata),
                 "report": generate_report(metadata, hash_code),
                 "uploadMethod": "ai",
                 "requiresReview": True,
@@ -658,7 +713,7 @@ class AppHandler(BaseHTTPRequestHandler):
         raise ValueError("developer is required")
 
     def _upload_time(self) -> str:
-        return datetime.now().isoformat(timespec="seconds")
+        return datetime.now().isoformat(timespec="microseconds")
 
     def _duplicate_hash_response(self, duplicate: dict[str, Any], hash_code: str) -> None:
         self._json(

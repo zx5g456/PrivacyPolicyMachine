@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "scope": "RQ1 end-to-end governance workflow",
+  "excludedScenario": "Attempted registration with an incorrect predecessor",
+  "exclusionReason": "Removed from the agreed RQ1 interface and evaluation scope.",
+  "requirements": [
+    {
+      "id": "RC-01",
+      "dimension": "Record construction",
+      "description": "AI analysis produces a review draft without persisting SQL or blockchain state.",
+      "scenarioIds": ["S2"]
+    },
+    {
+      "id": "RC-02",
+      "dimension": "Record construction",
+      "description": "A reviewed policy produces complete SQL and blockchain records.",
+      "scenarioIds": ["S1"]
+    },
+    {
+      "id": "RC-03",
+      "dimension": "Record construction",
+      "description": "An unclear extracted field remains explicit and is marked for review.",
+      "scenarioIds": ["S2"]
+    },
+    {
+      "id": "RC-04",
+      "dimension": "Record construction",
+      "description": "A human correction is stored with human_edited status and before/after evidence.",
+      "scenarioIds": ["S3"]
+    },
+    {
+      "id": "VM-01",
+      "dimension": "Version management",
+      "description": "A later version receives a new record key and links to the prior version.",
+      "scenarioIds": ["S4"]
+    },
+    {
+      "id": "VM-02",
+      "dimension": "Version management",
+      "description": "The earlier version remains unchanged after a later version is registered.",
+      "scenarioIds": ["S6"]
+    },
+    {
+      "id": "IP-01",
+      "dimension": "Integrity protection",
+      "description": "Stored bytes, hashes, chunk counts, and ordered commitments pass the chain audit.",
+      "scenarioIds": ["S1", "S6"]
+    },
+    {
+      "id": "IP-02",
+      "dimension": "Integrity protection",
+      "description": "Duplicate policy content is rejected without changing SQL or blockchain state.",
+      "scenarioIds": ["S5"]
+    },
+    {
+      "id": "RR-01",
+      "dimension": "Record retrieval",
+      "description": "Both current and earlier versions can be resolved after an update.",
+      "scenarioIds": ["S6"]
+    },
+    {
+      "id": "RR-02",
+      "dimension": "Record retrieval",
+      "description": "The earlier version remains independently auditable by record key.",
+      "scenarioIds": ["S6"]
+    },
+    {
+      "id": "CD-01",
+      "dimension": "Change detection",
+      "description": "The registered latest policy is accepted by verification.",
+      "scenarioIds": ["S7"]
+    },
+    {
+      "id": "CD-02",
+      "dimension": "Change detection",
+      "description": "Modified policy content is rejected and the failed comparisons are identified.",
+      "scenarioIds": ["S7"]
+    }
+  ]
+}

@@ -34,6 +34,16 @@ STATUS_METADATA_FIELDS = (
     "contactChannel",
 )
 
+# Only reviewed final values and policy identity are public. Evidence,
+# explanations, confidence, and human-review history stay in the local record.
+ON_CHAIN_METADATA_FIELDS = (
+    "policyId", "policyVersion", "applicationName", "developer",
+    "publisherEntity", "policyUrl", "serviceName", "effectiveDate",
+    "documentHash", "changeSummary", "uploadMethod",
+    "characterCount", "wordCount", "sectionCount", "sections",
+    *LIST_METADATA_FIELDS, *STATUS_METADATA_FIELDS, "riskFlags",
+)
+
 RISK_FLAG_DETAILS = {
     "unclear_retention": "The policy does not state a clear retention period.",
     "vague_third_party_sharing": "Third-party sharing is described without clear conditions.",
@@ -59,6 +69,40 @@ def canonical_metadata_bytes(metadata: dict) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def on_chain_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Project a complete local governance record onto its public schema."""
+
+    require_canonical_metadata_keys(metadata)
+    public = {
+        field: metadata[field]
+        for field in ON_CHAIN_METADATA_FIELDS
+        if field in metadata
+    }
+    if isinstance(public.get("riskFlags"), list):
+        public["riskFlags"] = [
+            flag for flag in public["riskFlags"] if flag != "review_recommended"
+        ]
+    return public
+
+
+def canonical_on_chain_metadata_bytes(metadata: dict[str, Any]) -> bytes:
+    return canonical_metadata_bytes(on_chain_metadata(metadata))
+
+
+def registered_metadata_match(
+    stored_content: bytes, local_metadata: dict[str, Any]
+) -> tuple[str, bytes]:
+    """Match new public records or older full-metadata records exactly."""
+
+    public = canonical_on_chain_metadata_bytes(local_metadata)
+    if stored_content == public:
+        return "governance_only", public
+    legacy = canonical_metadata_bytes(local_metadata)
+    if stored_content == legacy:
+        return "legacy_full", legacy
+    return "mismatch", public
 
 
 def require_canonical_metadata_keys(metadata: dict[str, Any]) -> None:

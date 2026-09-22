@@ -262,6 +262,8 @@ function openReview(result, context) {
     policyId: context.policyId || "",
     changeSummary: context.changeSummary || "",
     metadata: structuredClone(result.metadata),
+    originalMetadata: structuredClone(result.metadata),
+    reviewToken: result.reviewToken,
     file: context.file,
     applicationName: context.applicationName,
     developer: context.developer,
@@ -343,6 +345,8 @@ async function registerReviewedPolicy() {
   payload.append("policyUrl", pendingReview.policyUrl);
   payload.append("effectiveDate", pendingReview.effectiveDate);
   payload.append("metadataJson", JSON.stringify(pendingReview.metadata));
+  payload.append("originalMetadataJson", JSON.stringify(pendingReview.originalMetadata));
+  payload.append("reviewToken", pendingReview.reviewToken);
   payload.append("rawFile", pendingReview.file, pendingReview.file.name);
   if (pendingReview.workflow === "update") {
     payload.append("policyId", pendingReview.policyId);
@@ -984,7 +988,8 @@ function renderAssessmentHtml(assessmentKey, value) {
     return "";
   }
   const status = assessment.reviewStatus || "auto_extracted";
-  const confidence = Number(assessment.confidence);
+  const hasConfidence = assessment.confidence !== null && assessment.confidence !== "";
+  const confidence = hasConfidence ? Number(assessment.confidence) : Number.NaN;
   const confidenceText = Number.isFinite(confidence) ? confidence.toFixed(2) : "n/a";
   return `<div class="assessment ${status === "needs_review" ? "needs-review" : ""}">
     <span>Confidence ${escapeHtml(confidenceText)}</span>

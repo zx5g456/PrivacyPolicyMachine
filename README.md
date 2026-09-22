@@ -6,7 +6,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 
 - Create a policy by entering an application name and uploading a policy file.
 - Automatically use the upload time as the policy version.
-- Store the complete raw policy bytes and canonical metadata JSON in ordered chunks in L2 contract storage.
+- Store the complete raw policy bytes and canonical public governance metadata JSON in ordered chunks in L2 contract storage.
 - Query policies by application name and view the full policy text.
 - Verify a policy by entering the application name and uploading a file or pasting policy text.
 - Switch between prototype developers in the top bar.
@@ -141,9 +141,10 @@ independently from `processingPurpose`.
 ### `POST /api/policies/reviewed`
 
 Register an AI-reviewed draft. Required multipart fields are `applicationName`,
-`developer`, the original `rawFile`, and the approved `metadataJson`. The server
-validates the draft ID and upload-time version assigned by `/api/analyze`, then
-adds the hashes and finalized identity metadata.
+`developer`, the original `rawFile`, the approved `metadataJson`, the unchanged
+`originalMetadataJson` returned by `/api/analyze`, and its `reviewToken`. The
+server validates the signed draft, its identity, and the uploaded file before
+recording field-level human edits and adding finalized identity metadata.
 
 ### `GET /api/policies`
 
@@ -187,6 +188,8 @@ Required multipart fields:
 - `developer`: current prototype developer.
 - `rawFile`: new uploaded policy file.
 - `metadataJson`: AI-extracted metadata approved on the review page.
+- `originalMetadataJson`: unchanged metadata returned by `/api/analyze`.
+- `reviewToken`: signature returned by `/api/analyze`.
 
 The server only allows the update when the selected developer matches the latest
 record's developer. Updates must pass through `/api/analyze` and human review
@@ -213,6 +216,10 @@ Verification compares:
 The default model is `qwen3.5:9b`. It can be changed with
 `OLLAMA_MODEL`; timeout and retry count can be changed with
 `OLLAMA_TIMEOUT_SECONDS` and `OLLAMA_RETRIES`.
+`OLLAMA_CHAT_URL` can point to a different Ollama-compatible endpoint. For
+review drafts that must survive a server restart, configure a persistent,
+private `REVIEW_SIGNING_KEY`; otherwise the signing key is generated at startup.
+`POLICY_DB_PATH` can direct the server to an isolated SQLite file.
 
 ```bash
 ollama pull qwen3.5:9b
@@ -227,6 +234,12 @@ curl http://127.0.0.1:8000/api/analyze \
 - Application name is stored in the SQL column `policyName`.
 - Database records, API payloads, and canonical metadata JSON use camelCase keys throughout.
 - `metadataDetails` preserves a concise explanation for every reviewable metadata field; `metadataEvidence` retains the supporting policy quotations.
+- `humanReview` records whether a signed AI draft was confirmed or edited, the
+  reviewed time, and before/after snapshots of edited fields. Edited field
+  assessments use `reviewStatus=human_edited` and no inherited AI confidence.
+- `metadataEvidence`, `metadataDetails`, `metadataAssessment`, and `humanReview`
+  remain in SQLite only. The on-chain metadata contains final policy values and
+  identity, not evidence quotations, confidence, or review history.
 - `policyVersion` is no longer entered by the user. It is generated from upload time.
 - The developer switcher is only a prototype display control. There is no login system yet.
 - If incoming policy content already exists, the API returns `409 Conflict` and does not write a new SQL or chain record.
@@ -308,7 +321,7 @@ historical transaction input as the persistent policy archive.
 ```text
 TrustedPolicyRecord
 - documentHash: bytes32 (SHA-256 of the exact raw file bytes)
-- metadataHash: bytes32 (SHA-256 of canonical metadata JSON)
+- metadataHash: bytes32 (SHA-256 of canonical public governance metadata JSON)
 - documentChunkCommitment: bytes32
 - metadataChunkCommitment: bytes32
 - documentSize: uint64
@@ -325,13 +338,16 @@ TrustedPolicyRecord
 - hasPreviousReference: bool
 ```
 
-The complete raw file and metadata JSON are permanently stored in the contract's
+The complete raw file and public governance metadata JSON are permanently stored in the contract's
 chunk mappings. The contract computes each chunk hash and ordered commitment as
 chunks arrive. The server supplies the interoperable whole-content SHA-256 in the
 pending manifest, then reconstructs the finalized storage and verifies that hash.
 This avoids concatenating an arbitrarily large file inside one finalization call.
 The API's UUID `policyId` remains an application identifier inside canonical
-metadata; `recordKey` is the on-chain identifier for a policy version.
+metadata; `recordKey` is the on-chain identifier for a policy version. Review
+information is excluded before metadata hashing and upload. Verification also
+recognizes older records that stored the full metadata, but a past on-chain
+publication cannot be removed by this change.
 
 ## Independent on-chain storage audit
 
@@ -438,3 +454,27 @@ status, verifies the chain bundle, displays all four files, and downloads the
 complete ZIP.
 Restarting the Hardhat node creates a fresh chain, so deploy the contract again
 and use its new address after every restart.
+
+## RQ1 automated evaluation
+
+Run `npm run test:rq1` after installing the root npm and Python dependencies.
+The command compiles the contract, starts a separate temporary Hardhat chain,
+deploys the registry, starts the API with a temporary SQLite database, and uses
+a deterministic local Ollama-compatible stub. It does not call the live LLM or
+use `data/policies.db`. All test processes and temporary data are cleaned up.
+
+The first fixture is one synthetic XR policy family with two versions in
+`tests/rq1/fixtures/`. The evaluator runs seven agreed scenarios: initial
+registration, an unclear extraction, human correction, later-version
+registration, duplicate rejection, old-version retrieval/immutability, and
+modified-policy detection. The incorrect-predecessor scenario is excluded from
+the agreed scope. The requirement definitions and denominator are fixed in
+`tests/rq1/requirements.json`.
+
+Results are written to `test-results/rq1/rq1-results.json` (assertions, record
+keys, transaction hashes, and metric denominators) and
+`test-results/rq1/rq1-summary.md` (thesis-table summary). Set `RQ1_OUTPUT_DIR`
+to change the output location. These results describe deterministic workflow
+tests, not LLM extraction accuracy or a multi-policy corpus evaluation. The
+evidence-link metric checks local review evidence against raw bytes recovered
+from the chain; it does not assume evidence is stored on-chain.
