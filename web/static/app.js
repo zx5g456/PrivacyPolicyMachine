@@ -14,6 +14,8 @@ const blockValue = document.querySelector("#blockValue");
 const reportBox = document.querySelector("#reportBox");
 const queryBox = document.querySelector("#queryBox");
 const queryFullText = document.querySelector("#queryFullText");
+const queryPolicyPicker = document.querySelector("#queryPolicyPicker");
+const queryPolicySelect = document.querySelector("#queryPolicySelect");
 const recordsDetail = document.querySelector("#recordsDetail");
 const verificationBox = document.querySelector("#verificationBox");
 const updateBox = document.querySelector("#updateBox");
@@ -34,7 +36,10 @@ const viewTabs = document.querySelectorAll("[data-view]");
 const viewPages = document.querySelectorAll("[data-page]");
 let manageablePolicies = [];
 let listedPolicies = [];
+let queryPolicies = [];
 let chainRecordsByTx = new Map();
+let chainLookupError = "";
+let workflowBusy = false;
 let currentEvidence = {};
 let currentDetails = {};
 let currentAssessment = {};
@@ -141,11 +146,17 @@ queryForm.addEventListener("submit", async (event) => {
   setBusy(true);
   try {
     await loadRecords(applicationName);
+    queryPolicies = [...listedPolicies];
+    const policyGroups = groupPolicyVersions(queryPolicies);
+    queryPolicyPicker.hidden = policyGroups.length < 2;
+    queryPolicySelect.innerHTML = policyGroups.map(([policy]) =>
+      `<option value="${escapeHtml(policy.id)}">${escapeHtml(displayPolicyName(policy))} · ${escapeHtml(policy.policyId)}</option>`
+    ).join("");
     queryBox.className = "verification pass";
-    if (listedPolicies.length) {
-      renderQueryFullText(listedPolicies[0]);
-      verifyForm.applicationName.value = displayPolicyName(listedPolicies[0]);
-      queryBox.textContent = `Found ${listedPolicies.length} record(s). Showing the latest matching policy.`;
+    if (queryPolicies.length) {
+      renderQueryFullText(policyGroups[0][0]);
+      verifyForm.applicationName.value = displayPolicyName(policyGroups[0][0]);
+      queryBox.textContent = `Found ${policyGroups.length} matching ${policyGroups.length === 1 ? "policy" : "policies"}. Showing the latest version. Open Previous versions to view history.`;
     } else {
       queryFullText.textContent = "No matching policy found.";
       queryBox.textContent = `No records found for application name: ${applicationName}`;
@@ -156,6 +167,26 @@ queryForm.addEventListener("submit", async (event) => {
   } finally {
     setBusy(false);
   }
+});
+
+queryPolicySelect.addEventListener("change", () => {
+  const policy = queryPolicies.find((item) => String(item.id) === queryPolicySelect.value);
+  if (policy) {
+    renderQueryFullText(policy);
+    verifyForm.applicationName.value = displayPolicyName(policy);
+  }
+});
+
+queryFullText.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-view-version]");
+  const policy = button && queryPolicies.find((item) => String(item.id) === button.dataset.recordId);
+  if (policy) renderQueryFullText(policy);
+});
+
+recordsDetail.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-view-version]");
+  const policy = button && listedPolicies.find((item) => String(item.id) === button.dataset.recordId);
+  if (policy) selectRecordPolicy(policy);
 });
 
 verifyForm.addEventListener("submit", async (event) => {
@@ -460,12 +491,16 @@ recordList.addEventListener("click", (event) => {
   }
   const policy = listedPolicies.find((item) => String(item.id) === button.dataset.recordId);
   if (policy) {
-    verifyForm.rawText.value = policy.rawFile;
-    verifyForm.rawFile.value = "";
-    verifyForm.applicationName.value = displayPolicyName(policy);
-    renderRecordDetail(policy);
+    selectRecordPolicy(policy);
   }
 });
+
+function selectRecordPolicy(policy) {
+  verifyForm.rawText.value = policy.rawFile;
+  verifyForm.rawFile.value = "";
+  verifyForm.applicationName.value = displayPolicyName(policy);
+  renderRecordDetail(policy);
+}
 
 function showView(viewName, options = {}) {
   viewTabs.forEach((tab) => {
@@ -495,39 +530,42 @@ async function loadRecords(applicationName = "") {
   const manageablePath = developer
     ? `/api/policies/manageable?developer=${encodeURIComponent(developer)}`
     : "/api/policies/manageable";
-  const [recordsResponse, manageableResponse, chainResponse] = await Promise.all([
+  const [recordsResponse, manageableResponse] = await Promise.all([
     fetch(policyPath),
     fetch(manageablePath),
-    fetch("/api/chain"),
+    loadChainRecords(),
   ]);
   const data = await recordsResponse.json();
   const manageableData = await manageableResponse.json();
-  const chainData = await chainResponse.json();
+  if (!recordsResponse.ok) throw new Error(data.error || "Could not load policies");
+  if (!manageableResponse.ok) throw new Error(manageableData.error || "Could not load managed policies");
   const policies = data.policies || [];
-  const chainRecords = chainData.records || [];
-  chainRecordsByTx = new Map(chainRecords.map((record) => [record.txHash, record]));
   listedPolicies = policies;
   manageablePolicies = manageableData.policies || [];
-  recordCount.textContent = String(policies.length);
+  const latestPolicies = groupPolicyVersions(policies).map(([latest]) => latest);
+  recordCount.textContent = String(latestPolicies.length);
   manageableCount.textContent = String(manageablePolicies.length);
   renderManagedPolicies();
-  recordList.innerHTML = policies
+  recordList.innerHTML = latestPolicies
     .map((policy) => {
       const version = policy.policyVersion || "unversioned";
       const name = displayPolicyName(policy);
       const metadata = displayMetadataForPolicy(policy);
       const onChain = findOnChainRecord(policy);
-      const complianceStatus = onChain && onChain.compliance
+      const complianceStatus = !onChain ? "unavailable" : onChain.compliance
         ? onChain.compliance.status
         : "pending";
       return `<article class="record-card">
         <h3>${escapeHtml(name)}</h3>
+        <span class="version-label">Latest version</span>
         <p>Policy ID: ${escapeHtml(policy.policyId)}</p>
         <p>Developer: ${escapeHtml(policy.developerName || "unknown")}</p>
         <p>Upload method: ${escapeHtml(uploadMethodLabel(policy.uploadMethod))}</p>
         <p>Uploaded: ${escapeHtml(version)}</p>
         <p>Hash: ${escapeHtml(shorten(policy.hashCode))}</p>
         <p>Tx: ${escapeHtml(shorten(policy.txHash))}</p>
+        <p>Contract Address: ${escapeHtml(policy.contractAddress || (onChain && onChain.contractAddress) || "Not recorded")}</p>
+        <p>Chain: ${escapeHtml(chainRecordStatus(onChain))}</p>
         <p>Compliance: <span class="compliance-status ${escapeHtml(complianceStatus)}">${escapeHtml(complianceStatusLabel(complianceStatus))}</span></p>
         <p>Created: ${escapeHtml(policy.createdAt)}</p>
         ${renderMetadataSummaryHtml(metadata)}
@@ -543,8 +581,39 @@ async function loadRecords(applicationName = "") {
   if (!policies.length) {
     recordsDetail.textContent = "No records available.";
   } else {
-    renderRecordDetail(policies[0]);
+    renderRecordDetail(latestPolicies[0]);
   }
+}
+
+async function loadChainRecords() {
+  try {
+    const response = await fetch("/api/chain");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Could not query the current chain");
+    chainRecordsByTx = new Map((payload.records || []).map((record) => [record.txHash.toLowerCase(), record]));
+    chainLookupError = "";
+  } catch (error) {
+    chainRecordsByTx = new Map();
+    chainLookupError = error.message || "Could not query the current chain";
+  }
+  updateSystemStatus();
+}
+
+function groupPolicyVersions(policies) {
+  // The API returns newest uploads first (createdAt, then id descending).
+  const groups = new Map();
+  policies.forEach((policy) => {
+    const key = policy.policyId || `record:${policy.id}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(policy);
+  });
+  return [...groups.values()];
+}
+
+function policyVersions(policy, policies) {
+  return policies.filter((item) => policy.policyId
+    ? item.policyId === policy.policyId
+    : item.id === policy.id);
 }
 
 function renderManagedPolicies() {
@@ -587,14 +656,14 @@ function displayPolicyName(policy) {
 function renderQueryFullText(policy) {
   const onChain = findOnChainRecord(policy);
   const onChainData = displayMetadataForPolicy(policy);
-  queryFullText.innerHTML = renderPolicyDetailHtml(policy, onChain, onChainData);
+  queryFullText.innerHTML = renderPolicyDetailHtml(policy, onChain, onChainData, policyVersions(policy, queryPolicies));
   void hydrateCompliancePanel(queryFullText, onChain);
 }
 
 function renderRecordDetail(policy) {
   const onChain = findOnChainRecord(policy);
   const onChainData = displayMetadataForPolicy(policy);
-  recordsDetail.innerHTML = renderPolicyDetailHtml(policy, onChain, onChainData);
+  recordsDetail.innerHTML = renderPolicyDetailHtml(policy, onChain, onChainData, policyVersions(policy, listedPolicies));
   void hydrateCompliancePanel(recordsDetail, onChain);
 }
 
@@ -666,10 +735,17 @@ function renderVerification(result) {
 }
 
 function setBusy(isBusy) {
-  systemStatus.textContent = isBusy ? "Processing workflow" : "Local chain ready";
+  workflowBusy = isBusy;
+  updateSystemStatus();
   document.querySelectorAll("button").forEach((button) => {
     button.disabled = isBusy;
   });
+}
+
+function updateSystemStatus() {
+  systemStatus.textContent = workflowBusy
+    ? "Processing workflow"
+    : chainLookupError ? "Chain unavailable" : "Current chain connected";
 }
 
 function shorten(value) {
@@ -684,7 +760,18 @@ function uploadMethodLabel(method) {
 }
 
 function findOnChainRecord(policy) {
-  return chainRecordsByTx.get(policy.txHash) || null;
+  const record = chainRecordsByTx.get((policy.txHash || "").toLowerCase());
+  if (!record) return null;
+  const matchingReceipt = ["contractAddress", "recordKey", "blockHash"].every((key) =>
+    !policy[key] || String(policy[key]).toLowerCase() === String(record[key] || "").toLowerCase()
+  );
+  const matchingChain = policy.chainId == null || String(policy.chainId) === String(record.chainId);
+  return matchingReceipt && matchingChain ? record : null;
+}
+
+function chainRecordStatus(onChain) {
+  if (onChain) return "Found on current chain";
+  return chainLookupError ? "Chain query unavailable" : "Not found on current chain";
 }
 
 function displayMetadataForPolicy(policy) {
@@ -743,20 +830,20 @@ function metadataFallback(policy) {
     previousRecordKey: "",
     previousPolicyVersion: "",
     hasPreviousReference: false,
-    documentHash: "",
-    metadataHash: "",
-    documentChunkCommitment: "",
-    metadataChunkCommitment: "",
-    documentSize: 0,
-    metadataSize: 0,
-    documentChunkCount: 0,
-    metadataChunkCount: 0,
+    documentHash: policy.hashCode || "",
+    metadataHash: policy.metadataHash || "",
+    documentChunkCommitment: policy.documentChunkCommitment || "",
+    metadataChunkCommitment: policy.metadataChunkCommitment || "",
+    documentSize: policy.documentSize || 0,
+    metadataSize: policy.metadataSize || 0,
+    documentChunkCount: policy.documentChunkCount || 0,
+    metadataChunkCount: policy.metadataChunkCount || 0,
     registrant: "",
     registeredAt: "",
   };
 }
 
-function renderPolicyDetailHtml(policy, onChain, data) {
+function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
   const rawFile = policy.rawFile || "";
   const rawPreview = rawFile.length > 900 ? `${rawFile.slice(0, 900)}...` : rawFile;
   currentEvidence = data.metadataEvidence || {};
@@ -769,11 +856,14 @@ function renderPolicyDetailHtml(policy, onChain, data) {
           <h3>${escapeHtml(displayPolicyName(policy))}</h3>
           <p>${escapeHtml(policy.developerName || "unknown")} · ${escapeHtml(policy.policyVersion || "no upload time")} · ${escapeHtml(uploadMethodLabel(policy.uploadMethod))}</p>
         </div>
-        <div class="record-key">${escapeHtml(shorten(onChain ? onChain.recordKey || "" : "")) || "no record key"}</div>
+        <div class="record-key">${escapeHtml(shorten(policy.recordKey || (onChain && onChain.recordKey) || "")) || "no record key"}</div>
       </div>
 
+      ${renderVersionNavigationHtml(policy, versions)}
+      ${renderRegistrationReceiptHtml(policy, onChain)}
+
       <div class="metadata-grid-detail">
-        ${metadataGroups(data).map(([title, rows]) => renderMetadataGroupHtml(title, rows)).join("")}
+        ${metadataGroups(data, onChain ? "On-chain Audit" : "Saved Audit Data").map(([title, rows]) => renderMetadataGroupHtml(title, rows)).join("")}
       </div>
 
       ${renderCompliancePanelHtml(onChain)}
@@ -793,7 +883,54 @@ function renderPolicyDetailHtml(policy, onChain, data) {
   `;
 }
 
+function renderVersionNavigationHtml(policy, versions) {
+  const latest = versions[0] || policy;
+  const isLatest = latest.id === policy.id;
+  const index = versions.findIndex((version) => version.id === policy.id);
+  const previous = versions.slice(1);
+  return `<div class="policy-versions">
+    <div class="version-heading">
+      <span class="version-label">${isLatest ? "Latest version" : "Previous version"} · Version ${versions.length - index} of ${versions.length}</span>
+      ${isLatest ? "" : `<button type="button" class="version-action" data-view-version data-record-id="${escapeHtml(latest.id)}">Latest version</button>`}
+    </div>
+    ${previous.length ? `<details class="policy-history" ${isLatest ? "" : "open"}>
+      <summary>Previous versions (${previous.length})</summary>
+      <div class="version-list">
+        ${previous.map((version, previousIndex) => `<button type="button" class="version-action" data-view-version data-record-id="${escapeHtml(version.id)}" ${version.id === policy.id ? 'aria-current="true"' : ""}>
+          Version ${versions.length - previousIndex - 1} · ${escapeHtml(version.policyVersion || version.createdAt || "Upload time unavailable")}
+        </button>`).join("")}
+      </div>
+    </details>` : ""}
+  </div>`;
+}
+
+function renderRegistrationReceiptHtml(policy, onChain) {
+  const receipt = (key) => policy[key] == null || policy[key] === ""
+    ? onChain && onChain[key]
+    : policy[key];
+  const rows = [
+    ["Policy ID", policy.policyId],
+    ["Contract Address", receipt("contractAddress")],
+    ["Transaction Hash", receipt("txHash")],
+    ["Record Key", receipt("recordKey")],
+    ["Chain ID", receipt("chainId")],
+    ["Block Number", receipt("blockNumber")],
+    ["Block Hash", receipt("blockHash")],
+  ];
+  return `<section class="registration-receipt">
+    <h3>Saved Registration Receipt</h3>
+    <p class="chain-record-status">${escapeHtml(chainRecordStatus(onChain))}</p>
+    ${onChain ? "" : `<p>${chainLookupError
+      ? "The current chain could not be queried. The saved receipt and policy remain available; their current on-chain status could not be checked."
+      : "This saved registration is not present on the current chain. A local chain reset or a different deployment may cause this; the original receipt remains available below."}</p>`}
+    <dl class="receipt-fields">${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value == null || value === "" ? "Not recorded" : value)}</dd></div>`).join("")}</dl>
+  </section>`;
+}
+
 function renderCompliancePanelHtml(onChain) {
+  if (!onChain) {
+    return `<section class="compliance-panel"><div class="compliance-heading"><div><h3>On-chain Compliance Result</h3><p>${chainLookupError ? "The current chain is unavailable." : "This version was not found on the current chain."} Its on-chain compliance result cannot be loaded.</p></div><span class="compliance-status unavailable">Unavailable</span></div></section>`;
+  }
   const compliance = onChain && onChain.compliance
     ? onChain.compliance
     : { status: "pending" };
@@ -859,6 +996,7 @@ async function hydrateCompliancePanel(container, onChain) {
 }
 
 function complianceStatusLabel(status) {
+  if (status === "unavailable") return "Unavailable";
   if (status === "finalized") return "Finalized on chain";
   if (status === "uploading") return "Uploading";
   return "Pending analysis";
@@ -896,7 +1034,7 @@ function formatOnChainMetadata(data) {
     .join("\n\n");
 }
 
-function metadataGroups(data) {
+function metadataGroups(data, auditTitle = "On-chain Audit") {
   return [
     ["Identity", [
       ["Publisher", data.publisherEntity, ""],
@@ -905,7 +1043,7 @@ function metadataGroups(data) {
       ["Effective Date", data.effectiveDate, ""],
       ["Policy Version", data.policyVersion, ""],
     ]],
-    ["On-chain Audit", [
+    [auditTitle, [
       ["Document Hash", data.documentHash, ""],
       ["Metadata Hash", data.metadataHash, ""],
       ["Document Chunk Commitment", data.documentChunkCommitment, ""],

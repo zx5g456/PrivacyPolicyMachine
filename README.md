@@ -110,7 +110,7 @@ PORT=8002 .venv/bin/python -m server.app
 3. Submit the file for local AI analysis. Nothing is persisted during analysis.
 4. Review and edit the AI-extracted metadata, details, and evidence.
 5. Confirm the review to upload the content chunks and finalize the policy with the UUID and upload-time version assigned to the review draft.
-6. Use `Query` to search by application name. Matching records appear in `Registered Records`, and the latest match's full policy text is shown in the Query panel.
+6. Use `Query` to search by application name. `Latest Policies` shows the latest version of each policy, and the latest match's full policy text is shown in the Query panel. Click `Previous versions` to inspect older uploads, including the initial version, or `Latest version` to return to the current upload.
 7. Use `Verification` by entering the application name and either uploading a policy file or pasting policy text.
 8. Use `Update Policy` to analyze and review a new version. The dropdown only shows policies uploaded by the currently selected developer.
 
@@ -231,6 +231,29 @@ curl http://127.0.0.1:8000/api/analyze \
 - The developer switcher is only a prototype display control. There is no login system yet.
 - If incoming policy content already exists, the API returns `409 Conflict` and does not write a new SQL or chain record.
 - `sources/dataset/` is ignored by Git so the local dataset is not uploaded.
+
+### Historical versions and local chain resets
+
+Initial uploads and updates use the same registration path. Each saved version
+has its own transaction hash and record key, plus the registry contract address;
+versions registered to the same registry share that contract address. The UI
+shows the saved registration receipt even when that version cannot be found on
+the currently connected chain. A saved receipt alone is not current on-chain
+verification.
+
+`npm run dev` starts a fresh, in-memory Hardhat chain each time. Stopping and
+restarting it clears its on-chain records, while `data/policies.db` retains the
+SQL history. The fresh deployment can reuse the same contract address, so an
+unchanged address does not mean that the old chain data is still present. If an
+initial upload predates the restart, the new chain's version index will contain
+only versions registered after that restart. The UI distinguishes a missing
+current-chain record from an unavailable chain connection.
+
+To retain chain history during local development, keep the Hardhat node running
+and restart only the Python server or listener using the same deployment
+configuration. Preserving chain history across node restarts requires a
+persistent network or node storage; SQL history cannot restore the original
+transactions of a discarded Hardhat chain.
 
 ## Chunked L2 Storage
 

@@ -22,7 +22,7 @@
               <option value="charlie">Charlie</option>
             </select>
           </label>
-          <div class="status-pill" id="systemStatus">Local chain ready</div>
+          <div class="status-pill" id="systemStatus">Checking chain...</div>
         </div>
       </header>
 
@@ -108,6 +108,10 @@
             </label>
             <button class="secondary" type="submit">Query Policies</button>
             <div class="verification" id="queryBox">Search for an application to view the latest matching policy metadata.</div>
+            <label id="queryPolicyPicker" hidden>
+              Matching Policy
+              <select id="queryPolicySelect"></select>
+            </label>
             <div class="policy-fulltext" id="queryFullText">No policy selected.</div>
           </form>
         </section>
@@ -116,7 +120,7 @@
           <div class="records-layout">
             <section class="panel records">
               <div class="panel-heading">
-                <h2>Registered Records</h2>
+                <h2>Latest Policies</h2>
                 <div class="heading-actions">
                   <span id="recordCount">0</span>
                   <button class="icon-button" type="button" id="refreshButton" title="Refresh records">⟳</button>
