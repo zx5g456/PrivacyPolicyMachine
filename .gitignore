@@ -1,7 +1,6 @@
 data/policies.db
 data/compliance-results/
-sources/dataset/
-sources/test_sets/
+sources/
 source_size_analysis/
 compliance tool/
 __pycache__/
@@ -12,4 +11,8 @@ __pycache__/
 node_modules/
 artifacts/
 cache/
+tests/
+test-results/
+result-rq2/
 .*.uploading.cfg
+data/base-sepolia/

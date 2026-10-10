@@ -37,6 +37,48 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 
 ## Run locally
 
+### Deploy the contract to Base Sepolia
+
+The testnet deployment commands are separate from `npm run dev`, which starts
+the local Hardhat environment. They do not yet switch the Python application or
+listener to testnet wallet signing.
+
+```bash
+npm run contract:compile
+npm run sepolia:wallet
+npm run sepolia:status
+```
+
+The wallet command creates a dedicated deployer/policy wallet and compliance
+wallet once, then reuses them. It prints only public addresses. Private keys are
+stored unencrypted in `data/base-sepolia/wallet.json` with owner-only permissions;
+the entire directory is excluded from Git. Keep a secure backup of this file.
+These wallets are intended only for testing.
+
+Request **Base Sepolia ETH** for the deployer from the
+[Coinbase faucet](https://portal.cdp.coinbase.com/products/faucet). The deployer
+pays to create the contract and authorize the compliance wallet. The compliance
+wallet only needs funds when it starts uploading compliance results.
+
+```bash
+npm run sepolia:deploy
+```
+
+The command requires chain ID `84532`, signs transactions locally, verifies the
+deployed owner and compliance authorization, and saves the address, deployment
+block, transaction hashes, and bytecode hashes in
+`data/base-sepolia/deployment.json`. It saves signed transactions before
+broadcasting so rerunning the command can resume an interrupted deployment.
+A completed deployment is verified and reused rather than redeployed.
+
+The default RPC is `https://sepolia.base.org`; set `BASE_SEPOLIA_RPC_URL` to use
+another Base Sepolia endpoint. A process crash can leave `deploy.lock`; inspect
+the saved transaction hashes and make sure no deployment process is running
+before removing that lock. Do not delete the wallet or pending transaction
+journal to retry a deployment.
+
+### Local development
+
 Install and compile once:
 
 ```bash

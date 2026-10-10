@@ -8,6 +8,9 @@
     "chain": "hardhat node",
     "contract:compile": "hardhat compile",
     "contract:deploy": "node scripts/deploy-contract.js",
+    "sepolia:wallet": "node scripts/base-sepolia.js wallet",
+    "sepolia:status": "node scripts/base-sepolia.js status",
+    "sepolia:deploy": "node scripts/base-sepolia.js deploy",
     "contract:test-compliance": "node scripts/test-compliance-contract.js"
   },
   "devDependencies": {
