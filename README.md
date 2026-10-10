@@ -361,6 +361,61 @@ Contract storage is public. Do not register secrets or personal information that
 should not be publicly recoverable. A restarted `npm run dev` creates a new
 ephemeral Hardhat chain, so durable third-party audit requires a persistent L2.
 
+### RQ2 manual upload and independent audit
+
+Use the frontend to upload policies, generate metadata with the configured AI
+model, review it, and register the approved content. The
+[policy files](sources/q2_data/README.md) are available for manual version-history
+experiments.
+
+1. Start the application with `npm run dev` and open the printed web URL. Keep
+   this environment running through the audit; restarting it creates a fresh
+   local chain. Record the printed `RPC_URL` and `CONTRACT_ADDRESS`.
+2. Select a developer, enter an `Application Name`, and use `Create Policy` to
+   upload the oldest policy version. Review the AI-generated metadata and confirm
+   registration.
+3. Use `Update Policy` under the same developer and application for each later
+   version, uploading them in chronological order. Review and confirm each one.
+4. In another terminal, run `scripts/rq2-audit.js` against that same RPC and
+   deployed contract.
+
+The current frontend assigns `policyVersion` from the upload time. Dates in
+policy filenames and bodies identify the source revisions; they do not override
+that on-chain version value. Enter the policy date as `effectiveDate` when needed.
+
+For example, after uploading under the `Alice` developer selector and an
+application named `Breach VR`, run:
+
+```bash
+node scripts/rq2-audit.js \
+  --rpc-url http://127.0.0.1:8545 \
+  --contract-address 0xYourRegistryAddress \
+  --publisher 'alice' \
+  --service 'Breach VR' \
+  --artifact artifacts/contracts/TrustedPolicyRegistry.sol/TrustedPolicyRegistry.json \
+  --output-dir result-rq2 > rq2-audit.json
+```
+
+Replace the RPC URL and contract address with the running application's values.
+`--publisher` must match the submitted developer value (`alice`, `bob`, or
+`charlie`), and `--service` must match the application name exactly. The
+publisher argument is the developer identity used during registration, rather
+than a company name extracted from the policy text.
+
+The auditor reads the RPC, registry, and ABI to reconstruct policy and approved
+metadata bytes, recompute hashes and ordered chunk commitments, verify
+finalization transactions and events, and follow predecessor links. It does not
+require a local source manifest, the policy files, the application API, SQLite,
+or an LLM. It does not create registrations or generate replacement metadata.
+
+The command writes its JSON result to `rq2-audit.json`; `valid`, `errors`, and
+per-record `checks` explain the outcome. The optional `--output-dir` saves the
+recovered policy bytes and metadata JSON under their record keys. The CLI exits
+with a nonzero status when an audit check fails. Run it separately for each
+publisher/application pair. These checks establish content integrity and version
+relationships, not whether the AI correctly interpreted the policy or whether
+an organisation complies with it.
+
 ## Off-chain Event Listener
 
 Every successful `finalizePolicyRegistration` transaction emits the contract's
