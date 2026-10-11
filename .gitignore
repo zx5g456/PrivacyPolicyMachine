@@ -1,8 +1,9 @@
 data/policies.db
 data/compliance-results/
-sources/dataset/
-sources/test_sets/
+sources/
 source_size_analysis/
+test-results/
+recovered-rq2/
 compliance tool/
 __pycache__/
 *.pyc
