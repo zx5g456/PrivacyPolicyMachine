@@ -1,5 +1,8 @@
 # Privacy Policy Machine
 
+The prepared 15-policy RQ3 prompt comparison, runner, scoring script, and
+annotation guide are documented in [rq3/README.md](rq3/README.md).
+
 A runnable prototype for registering, querying, updating, and verifying privacy policies with a small web UI, SQLite storage, and a deployed Solidity registry.
 
 ## Features

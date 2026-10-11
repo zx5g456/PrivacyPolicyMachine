@@ -1,0 +1,16 @@
+policy_id,policy_name,source_path,sha256,bytes,words,characters,chunks_at_3000
+P01,Oberon Technologies,sources/dataset/high_risk_pp/www.oberontech.com.txt,6277f43029742543f6fa2ca2db9b514e3078ca86a75ca9069db96686670b6d0e,2026,313,2026,1
+P02,Taanga Studios,sources/dataset/high_risk_pp/www.taangastudios.com.txt,75d46135e4a05ea9e1f3583de86a7feeade131afebaba32db26a9e3e1fcada4d,2341,403,2341,1
+P03,Pillow,sources/dataset/high_risk_pp/www.pillow.social.txt,03df4d186e6255f8c693cca38c0c3d4f0674beb6e57beab95db1b485029a7aa1,2720,444,2720,1
+P04,Medicalholodeck,sources/dataset/high_risk_pp/www.medicalholodeck.com.txt,7e59d9dfdeaf3afccd16cd924aa10a00c053129a1621366146047e08131ce2c1,3189,492,3188,2
+P05,Simodont Dental Trainer,sources/dataset/high_risk_pp/www.simodontdentaltrainer.com.txt,4b52de83bc844019a3bc755001912859c69e85153ddfbdd6be19542bf1161a82,3248,520,3242,2
+P06,Court Time Tennis,sources/dataset/high_risk_pp/courttimetennis.com.txt,6b0fb0ebb51edd08d16172f05607c57fa8e7a9fa20a13ff86ff2eeef350c49ac,3597,598,3593,2
+P07,Gun Raiders,sources/dataset/ai-xr-oculus/3982869578392875_privacy_policy.txt,dcaea172bfe7bff9e3fc9c57590a29dc9b478c16253b7c6da2fa9c42a4a361cd,3610,579,3598,2
+P08,Quill,sources/dataset/high_risk_pp/quill.art.txt,175006118de944f84ddb4d7e8488f8d01e074762e4977d0a8811c644bcb2f699,3740,616,3740,2
+P09,Blue Duck Studios,sources/dataset/ai-xr-oculus/5934280436582748_privacy_policy.txt,6ae2e35ab4d7d1858da57e9ed7420465151cee3b4d8ba00fd3840b71bdba5411,3822,621,3819,2
+P10,Commuter Games,sources/dataset/ai-xr-oculus/3927222113966481_privacy_policy.txt,91859268a649bdf479953182cc45122893ce862d3b9ad6d91b7614bb20a33605,3914,622,3909,2
+P11,Dance Dance Dance,sources/dataset/ai-xr-oculus/7969053893147948_privacy_policy.txt,50872391fa21f64ab12a142817b1f9e5c146953eb485f8d97ec8a2cc09635f04,4287,683,4287,2
+P12,Uptale,sources/dataset/high_risk_pp/www.uptale.io.txt,07e35aa4e686686dc5b2646bd5be1b8ab9fd9a2b8ecb05cac0e644cd85731c2c,4607,773,4586,2
+P13,Aim XR,sources/dataset/ai-xr-oculus/4245506092131005_privacy_policy.txt,0dfde27e822244c8e17b1456a9a50630fd1c25daa98cb265ee0dc7e894a0ea12,4699,799,4685,2
+P14,Vermillion,sources/dataset/high_risk_pp/vermillion-vr.com.txt,475187292f132fbd9ed2efab25cab55c95457f6c40e8b30882c601521cc53dea,5267,852,5229,2
+P15,Cubism,sources/dataset/ai-xr-oculus/2264524423619421_privacy_policy.txt,c3948634e2f3fd18ad83221450e876c68dd3c37941dd4ddef87b8511e8b3e925,5319,888,5311,2
