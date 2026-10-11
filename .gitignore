@@ -12,5 +12,5 @@ node_modules/
 artifacts/
 cache/
 test-results/
-result-rq2/
+recovered-rq2/
 .*.uploading.cfg

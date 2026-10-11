@@ -389,7 +389,10 @@ ephemeral Hardhat chain, so durable third-party audit requires a persistent L2.
 Use the frontend to upload policies, generate metadata with the configured AI
 model, review it, and register the approved content. The
 [policy files](sources/q2_data/README.md) are available for manual version-history
-experiments.
+experiments. The evaluated RQ2 set contains 43 versions across 12 policy
+families; the three additional undated source originals are references outside
+that result. All 43 evaluated versions have matching policy and metadata files
+in `recovered-rq2/`, with no retrieval failures.
 
 1. Start the application with `npm run dev` and open the printed web URL. Keep
    this environment running through the audit; restarting it creates a fresh
