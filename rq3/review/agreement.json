@@ -1,0 +1,60 @@
+{
+  "reviewers": [
+    "Jerry",
+    "Tom"
+  ],
+  "policies": 15,
+  "list_field_exact_matches": 121,
+  "list_field_total": 135,
+  "status_field_exact_matches": 160,
+  "status_field_total": 165,
+  "field_disagreements": {
+    "P01": [
+      "permittedUsage",
+      "thirdPartyPurpose"
+    ],
+    "P02": [],
+    "P03": [
+      "thirdPartyPurpose"
+    ],
+    "P04": [
+      "permittedUsage"
+    ],
+    "P05": [],
+    "P06": [
+      "dataTypeTags",
+      "collectionContext",
+      "processingPurpose"
+    ],
+    "P07": [
+      "dataTypeTags"
+    ],
+    "P08": [
+      "sharingCondition",
+      "anonymisation"
+    ],
+    "P09": [],
+    "P10": [
+      "collectionContext"
+    ],
+    "P11": [
+      "dataTypeTags"
+    ],
+    "P12": [
+      "permittedUsage"
+    ],
+    "P13": [
+      "dataTypeTags",
+      "retentionPolicy"
+    ],
+    "P14": [
+      "dataTypeTags",
+      "processingPurpose",
+      "sharingCondition"
+    ],
+    "P15": [
+      "retentionPolicy"
+    ]
+  },
+  "adjudicated_fields": 28
+}

@@ -28,6 +28,15 @@ The command prints cumulative session time and a rough ETA while running.
 `sources/q2_data/` contains synthetic revisions for the RQ2 integrity test;
 the RQ3 manifest uses the independent `sources/dataset/` policy texts instead.
 
+The paths in `policies.csv` expect files directly under
+`sources/dataset/high_risk_pp/` and `sources/dataset/ai-xr-oculus/`. The dataset
+archive itself contains a top-level `dataset/` directory, so extract it into
+`sources/`. If it was extracted into `sources/dataset/` instead and the files
+are under `sources/dataset/dataset/`, copy the policy files listed in
+`policies.csv` into the expected directories one level up. The runner checks
+each selected file against its SHA-256 digest in the manifest before any model
+call.
+
 ## Run
 
 From the repository root, with dependencies installed:
@@ -36,6 +45,22 @@ From the repository root, with dependencies installed:
 PYTHONPATH=. .venv/bin/python -m rq3.run --dry-run
 PYTHONPATH=. .venv/bin/python -m rq3.run --backend ollama --model qwen3.5:9b --out-dir rq3/results/main
 ```
+
+On Windows PowerShell, run these commands from the repository root. Install
+Ollama first, then pull `qwen3.5:9b` only if `ollama list` does not show it:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+ollama list
+# If missing: ollama pull qwen3.5:9b
+.\.venv\Scripts\python.exe -m rq3.run --dry-run
+.\.venv\Scripts\python.exe -m rq3.run --backend ollama --model qwen3.5:9b --out-dir rq3/results/main
+```
+
+The `-m` commands above work from the repository root without setting
+`PYTHONPATH`. The virtual environment installs `tzdata` on Windows so Python
+can use the experiment's `Australia/Brisbane` timestamps.
 
 The default model is the repository's local Ollama model. To use OpenAI instead,
 set `OPENAI_API_KEY` in the environment and pass `--backend openai --model MODEL`.
@@ -51,6 +76,12 @@ plus `--resume`:
 
 ```sh
 PYTHONPATH=. .venv/bin/python -m rq3.run --backend ollama --model qwen3.5:9b --out-dir rq3/results/main --resume
+```
+
+On Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m rq3.run --backend ollama --model qwen3.5:9b --out-dir rq3/results/main --resume
 ```
 
 Every completed model call is saved atomically to `pending_job.json`; every
@@ -107,6 +138,12 @@ Run the separate scoring script after collecting outputs:
 PYTHONPATH=. .venv/bin/python -m rq3.evaluate rq3/results/main/runs.jsonl --gold rq3/gold.jsonl
 ```
 
+On Windows PowerShell, after completing the annotations:
+
+```powershell
+.\.venv\Scripts\python.exe -m rq3.evaluate rq3/results/main/runs.jsonl --gold rq3/gold.jsonl
+```
+
 It writes `scores_by_run.csv` and `summary.csv`. Precision/recall/F1 count each
 list label or explicit yes/no status as one asserted fact; `unclear` is an
 abstention, not a positive fact. Gold `unclear` creates no positive fact.
@@ -133,6 +170,12 @@ has a blank rate.
 
 ```sh
 PYTHONPATH=. .venv/bin/python -m rq3.evaluate rq3/results/main/runs.jsonl --gold rq3/gold.jsonl --review rq3/review.jsonl
+```
+
+On Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m rq3.evaluate rq3/results/main/runs.jsonl --gold rq3/gold.jsonl --review rq3/review.jsonl
 ```
 
 The final report still needs inter-annotator agreement before adjudication,

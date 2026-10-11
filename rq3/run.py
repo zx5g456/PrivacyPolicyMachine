@@ -5,18 +5,28 @@ from __future__ import annotations
 
 import argparse
 import csv
-import fcntl
 import hashlib
 import json
 import os
 import random
+import sys
 import time
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+# Also support `python rq3/run.py` from a checkout without PYTHONPATH.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.llm_processor import chunk_policy
 from rq3.prompts import CONFIGS, extraction_prompt, merge_prompt
@@ -44,6 +54,35 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
         file.flush()
         os.fsync(file.fileno())
     os.replace(temporary, path)
+
+
+@contextmanager
+def exclusive_run_lock(path: Path) -> Iterator[None]:
+    """Keep one runner per output directory on Windows and Unix."""
+    with path.open("a+b") as lock:
+        if os.name == "nt":
+            # msvcrt locks a byte at the current file position. Keep byte 0
+            # available even when this is a newly created lock file.
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"\0")
+                lock.flush()
+            lock.seek(0)
+        try:
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError(f"Another runner is already using {path.parent}") from exc
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def read_journal(path: Path) -> list[dict[str, Any]]:
@@ -328,12 +367,7 @@ def main() -> None:
     ):
         raise FileExistsError("Output directory is not empty; use --resume or a new --out-dir")
     out.mkdir(parents=True, exist_ok=True)
-    lock_path = out / "run.lock"
-    with lock_path.open("a+") as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError(f"Another runner is already using {out}") from exc
+    with exclusive_run_lock(out / "run.lock"):
         metadata_path = out / "run_metadata.json"
         results_path = out / "runs.jsonl"
         pending_path = out / "pending_job.json"

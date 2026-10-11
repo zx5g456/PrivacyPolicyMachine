@@ -134,6 +134,16 @@ class RQ3ResumeTests(unittest.TestCase):
             self.invoke(self.args(configs=["C0"], resume=True), self.response)
         self.assertFalse((self.output / "run_metadata.json").exists())
 
+    def test_output_directory_lock_rejects_concurrent_runner(self) -> None:
+        self.output.mkdir()
+        path = self.output / "run.lock"
+        with run.exclusive_run_lock(path):
+            with self.assertRaisesRegex(RuntimeError, "Another runner"):
+                with run.exclusive_run_lock(path):
+                    pass
+        with run.exclusive_run_lock(path):
+            pass
+
     def test_failed_job_is_retried_with_preserved_attempt_history(self) -> None:
         def unavailable(**_kwargs: object) -> tuple[str, dict]:
             raise OSError("model temporarily unavailable")
