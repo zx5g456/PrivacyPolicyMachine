@@ -45,7 +45,7 @@
               </div>
 
               <label>
-                Application Name
+                Application Name *
                 <input name="applicationName" required placeholder="Your application name">
               </label>
 
@@ -72,7 +72,6 @@
             <section class="panel results">
               <div class="panel-heading">
                 <h2>Processing Result</h2>
-                <span class="metric" id="readinessMetric">0%</span>
               </div>
               <div class="summary-grid">
                 <div>
@@ -199,10 +198,13 @@
             <p class="review-guidance" id="reviewGuidance"></p>
             <div class="review-layout">
               <div class="review-fields" id="reviewFields"></div>
-              <div>
-                <h3>Policy text</h3>
+              <aside class="review-source" id="reviewSource">
+                <div class="review-source-heading">
+                  <div><p class="eyebrow">Source document</p><h3>Policy text</h3></div>
+                  <span id="reviewSourceStatus" role="status" aria-live="polite">Select an evidence quote to locate it.</span>
+                </div>
                 <pre class="review-policy" id="reviewPolicy"></pre>
-              </div>
+              </aside>
             </div>
             <div class="review-actions">
               <button class="primary" id="confirmReview" type="button">Confirm and Register</button>

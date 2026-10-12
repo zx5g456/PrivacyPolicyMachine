@@ -6,7 +6,6 @@ const sampleButton = document.querySelector("#sampleButton");
 const refreshButton = document.querySelector("#refreshButton");
 const developerSelect = document.querySelector("#developerSelect");
 const managedPolicySelect = document.querySelector("#managedPolicySelect");
-const readinessMetric = document.querySelector("#readinessMetric");
 const hashValue = document.querySelector("#hashValue");
 const txValue = document.querySelector("#txValue");
 const storageValue = document.querySelector("#storageValue");
@@ -29,6 +28,7 @@ const reviewMethod = document.querySelector("#reviewMethod");
 const reviewGuidance = document.querySelector("#reviewGuidance");
 const reviewFields = document.querySelector("#reviewFields");
 const reviewPolicy = document.querySelector("#reviewPolicy");
+const reviewSourceStatus = document.querySelector("#reviewSourceStatus");
 const reviewStatus = document.querySelector("#reviewStatus");
 const confirmReview = document.querySelector("#confirmReview");
 const cancelReview = document.querySelector("#cancelReview");
@@ -69,6 +69,30 @@ const reviewFieldDefinitions = [
   ["riskFlags", "Risk Flags", "list"],
 ];
 
+const reviewFieldHelp = {
+  dataTypeTags: "Categories of personal information the policy says it collects or uses, such as location or contact information.",
+  dataSourceTypes: "Where that information comes from, such as the user, a device sensor, or another service.",
+  collectionContext: "When or during which activity the information is collected.",
+  processingPurpose: "Why the organisation processes the information.",
+  permittedUsage: "Uses of the information that the policy explicitly allows.",
+  thirdPartySources: "Outside services from which the organisation receives information.",
+  downstreamStakeholders: "Outside organisations that may receive or process the information.",
+  thirdPartyPurpose: "Why information is shared with or processed by those outside organisations.",
+  regulatoryFramework: "Privacy laws or regulatory frameworks named in the policy.",
+  sharingCondition: "Whether the policy states conditions or limits for sharing information.",
+  consentRequired: "Whether the policy says a user must consent before the relevant processing.",
+  optOutAvailable: "Whether users can refuse or stop a type of processing or sharing.",
+  deletionAvailable: "Whether users can request deletion of their information.",
+  requestChannel: "Whether the policy gives users a way to make privacy requests.",
+  retentionPolicy: "Whether the policy explains how long information is kept or how retention is decided.",
+  encryptionApplied: "Whether the policy says encryption protects information.",
+  anonymisation: "Whether the policy describes removing or reducing identifying information.",
+  crossBorderTransfer: "Whether the policy discusses transferring information between countries.",
+  childDataInvolved: "Whether the policy discusses collecting or handling children's information.",
+  contactChannel: "Whether the policy provides a privacy contact method.",
+  riskFlags: "Potential concerns inferred from missing, vague, or sensitive policy statements. Check these against the source.",
+};
+
 const reviewListOptions = {
   dataTypeTags: ["location", "voice_recording", "eye_tracking", "device_id", "payment_info", "contact_info"],
   dataSourceTypes: ["user_provided", "device_sensor", "third_party_login", "cookies", "xr_headset_sensor"],
@@ -88,6 +112,23 @@ We share limited data with third party vendors that provide hosting and analytic
 We retain records only for the storage period required to provide the service.
 Users may access, correct, delete, or opt out of certain processing activities.
 We use security safeguards including encryption and access controls.`;
+
+const today = new Date();
+policyForm.effectiveDate.value = [
+  today.getFullYear(),
+  String(today.getMonth() + 1).padStart(2, "0"),
+  String(today.getDate()).padStart(2, "0"),
+].join("-");
+
+policyForm.rawFile.addEventListener("change", () => {
+  const file = policyForm.rawFile.files[0];
+  if (file && !policyForm.applicationName.value.trim()) {
+    const extensionIndex = file.name.lastIndexOf(".");
+    policyForm.applicationName.value = extensionIndex > 0
+      ? file.name.slice(0, extensionIndex)
+      : file.name;
+  }
+});
 
 sampleButton.addEventListener("click", () => {
   const sampleFile = new File([samplePolicy], "sample-privacy-policy.txt", { type: "text/plain" });
@@ -133,6 +174,28 @@ policyForm.addEventListener("submit", async (event) => {
 
 cancelReview.addEventListener("click", () => clearReview());
 confirmReview.addEventListener("click", registerReviewedPolicy);
+reviewFields.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-evidence-line]");
+  if (!button) return;
+  const editor = button.closest(".review-evidence-editor").querySelector("textarea");
+  const quote = editor.value.split("\n")[Number(button.dataset.evidenceLine)]?.trim();
+  locateEvidence(reviewPolicy, quote, reviewSourceStatus);
+});
+reviewFields.addEventListener("input", (event) => {
+  if (!event.target.matches(".review-evidence-editor textarea")) return;
+  const editor = event.target.closest(".review-evidence-editor");
+  editor.querySelector(".review-quote-links").innerHTML = renderEvidenceLinks(event.target.value);
+});
+reviewFields.addEventListener("change", (event) => {
+  const card = event.target.closest(".review-field-group");
+  if (!card) return;
+  const summary = card.querySelector(".review-field-summary");
+  if (event.target.matches("[data-review-field]")) summary.textContent = event.target.value;
+  if (event.target.matches("[data-review-list-item]")) {
+    summary.textContent = [...card.querySelectorAll("[data-review-list-item]:checked")]
+      .map((item) => item.value).join(", ") || "None selected";
+  }
+});
 
 queryForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -178,12 +241,14 @@ queryPolicySelect.addEventListener("change", () => {
 });
 
 queryFullText.addEventListener("click", (event) => {
+  if (jumpToSavedEvidence(event, queryFullText)) return;
   const button = event.target.closest("[data-view-version]");
   const policy = button && queryPolicies.find((item) => String(item.id) === button.dataset.recordId);
   if (policy) renderQueryFullText(policy);
 });
 
 recordsDetail.addEventListener("click", (event) => {
+  if (jumpToSavedEvidence(event, recordsDetail)) return;
   const button = event.target.closest("[data-view-version]");
   const policy = button && listedPolicies.find((item) => String(item.id) === button.dataset.recordId);
   if (policy) selectRecordPolicy(policy);
@@ -272,7 +337,7 @@ async function postForm(path, payload) {
 async function analyzeForReview(payload, context) {
   setBusy(true);
   context.statusBox.className = context.workflow === "update" ? "verification" : context.statusBox.className;
-  context.statusBox.textContent = "Running local AI analysis...";
+  context.statusBox.textContent = "Running AI analysis...";
   try {
     const result = await postForm("/api/analyze", payload);
     openReview(result, context);
@@ -302,10 +367,15 @@ function openReview(result, context) {
   reviewMethod.textContent = context.workflow === "update"
     ? "AI update · human approval required"
     : "AI upload · human approval required";
-  reviewGuidance.textContent = "The local model produced the draft below. Check every value and correct it before registration.";
+  reviewGuidance.textContent = "The AI model produced the draft below. Check every value and correct it before registration.";
   reviewPolicy.textContent = pendingReview.file ? "Loading policy text..." : "Policy text unavailable.";
+  reviewSourceStatus.textContent = "Select an evidence quote to locate it.";
   if (pendingReview.file) {
-    pendingReview.file.text().then((text) => { reviewPolicy.textContent = text; });
+    pendingReview.file.text().then((text) => {
+      if (pendingReview?.file === context.file) reviewPolicy.textContent = text;
+    }).catch(() => {
+      reviewPolicy.textContent = "Policy text could not be loaded.";
+    });
   }
   reviewFields.innerHTML = reviewFieldDefinitions.map(([key, label, type]) => {
     const value = pendingReview.metadata[key];
@@ -314,19 +384,18 @@ function openReview(result, context) {
     const detailsControl = `<label class="review-evidence-label">Details
       <textarea class="review-evidence" data-review-details="${escapeHtml(key)}" placeholder="Add a concise, policy-grounded explanation.">${escapeHtml(details)}</textarea>
     </label>`;
-    const evidenceControl = `<label class="review-evidence-label">Evidence
-      <textarea class="review-evidence" data-review-evidence="${escapeHtml(key)}" placeholder="No evidence. Add one exact quotation per line if available.">${escapeHtml(evidence.join("\n"))}</textarea>
-    </label>`;
+    const evidenceControl = renderReviewEvidenceEditor(`data-review-evidence="${escapeHtml(key)}"`, evidence);
+    const header = renderReviewFieldHeader(key, label, type === "list" ? value : value || "unclear", evidence.length);
     if (type === "status") {
       const choices = ["yes", "no", "unclear"];
       if (value && !choices.includes(String(value))) {
         choices.push(String(value));
       }
-      return `<section class="review-field-group"><label>${escapeHtml(label)}
+      return `<details class="review-field-group"><summary>${header}</summary><div class="review-field-body"><label class="review-value-label">Review value
           <select data-review-field="${escapeHtml(key)}" data-review-type="status">
             ${choices.map((choice) => `<option value="${escapeHtml(choice)}" ${String(value) === choice ? "selected" : ""}>${escapeHtml(choice)}</option>`).join("")}
           </select>
-        </label>${detailsControl}${evidenceControl}</section>`;
+        </label>${detailsControl}${evidenceControl}</div></details>`;
     }
     return renderReviewListField(key, label, value, pendingReview.metadata.metadataEvidence[key], details);
   }).join("");
@@ -409,26 +478,61 @@ function renderReviewListField(key, label, value, evidence, details) {
   const selected = Array.isArray(value) ? value.map(String) : [];
   const options = [...new Set([...(reviewListOptions[key] || []), ...selected])];
   const evidenceByItem = evidence && typeof evidence === "object" && !Array.isArray(evidence) ? evidence : {};
-  return `<section class="review-field-group review-list-group">
-    <h3>${escapeHtml(label)}</h3>
-    <div class="review-list-items">
+  return `<details class="review-field-group review-list-group">
+    <summary>${renderReviewFieldHeader(key, label, selected, reviewEvidenceLines(evidence).length)}</summary>
+    <div class="review-field-body"><div class="review-list-items">
       ${options.map((item) => {
         const lines = reviewEvidenceLines(evidenceByItem[item]);
         return `<section class="review-list-item">
           <label class="review-item-toggle">
             <input type="checkbox" data-review-list-item="${escapeHtml(key)}" value="${escapeHtml(item)}" ${selected.includes(item) ? "checked" : ""}>
-            <span>${escapeHtml(item)}</span>
+            <span>${escapeHtml(item.replaceAll("_", " "))}</span>
           </label>
-          <label class="review-evidence-label">Evidence for ${escapeHtml(item)}
-            <textarea class="review-evidence" data-review-item-evidence="${escapeHtml(key)}" data-review-item="${escapeHtml(item)}" placeholder="No evidence for this item.">${escapeHtml(lines.join("\n"))}</textarea>
-          </label>
+          ${renderReviewEvidenceEditor(`data-review-item-evidence="${escapeHtml(key)}" data-review-item="${escapeHtml(item)}"`, lines, `Evidence for ${item}`)}
         </section>`;
       }).join("")}
     </div>
     <label class="review-evidence-label">Details
       <textarea class="review-evidence" data-review-details="${escapeHtml(key)}" placeholder="Add a concise, policy-grounded explanation.">${escapeHtml(details || "")}</textarea>
     </label>
-  </section>`;
+    </div></details>`;
+}
+
+function renderReviewFieldHeader(key, label, value, evidenceCount) {
+  const summary = Array.isArray(value) ? (value.length ? value.join(", ") : "None selected") : String(value);
+  return `<span class="review-field-heading"><span class="review-field-title">${escapeHtml(label)}</span>
+    <span class="review-field-summary">${escapeHtml(summary)}</span>
+    <span class="review-field-count">${evidenceCount} ${evidenceCount === 1 ? "quote" : "quotes"}</span></span>
+    <span class="review-field-help">${escapeHtml(reviewFieldHelp[key])}</span>`;
+}
+
+function renderReviewEvidenceEditor(attributes, lines, label = "Evidence") {
+  const text = lines.join("\n");
+  return `<div class="review-evidence-editor"><label class="review-evidence-label">${escapeHtml(label)}
+    <textarea class="review-evidence" ${attributes} placeholder="Add one exact quotation per line if available.">${escapeHtml(text)}</textarea>
+  </label><div class="review-quote-links">${renderEvidenceLinks(text)}</div></div>`;
+}
+
+function renderEvidenceLinks(text) {
+  return text.split("\n").map((line, index) => line.trim()
+    ? `<button type="button" class="evidence-jump" data-evidence-line="${index}" title="Find this quote in the policy">Find quote ${index + 1} in policy ↗</button>`
+    : "").join("");
+}
+
+function locateEvidence(pre, quote, status) {
+  const source = pre.textContent;
+  if (!quote || !source || source === "Loading policy text...") {
+    status.textContent = "Policy text or quote is unavailable.";
+    return;
+  }
+  const start = source.indexOf(quote);
+  if (start < 0) {
+    status.textContent = "This quote was not found exactly in the policy text. Check its wording.";
+    return;
+  }
+  pre.innerHTML = `${escapeHtml(source.slice(0, start))}<mark class="source-highlight">${escapeHtml(quote)}</mark>${escapeHtml(source.slice(start + quote.length))}`;
+  pre.querySelector("mark").scrollIntoView({ block: "center", behavior: "smooth" });
+  status.textContent = `Quote found at character ${start + 1}.`;
 }
 
 function normalizeReviewMetadata(metadata) {
@@ -694,7 +798,6 @@ function formatError(error) {
 function renderProcessingResult(result) {
   const report = result.report;
   const onChainData = result.onChain && result.onChain.data;
-  readinessMetric.textContent = `${report.readinessScore}%`;
   hashValue.textContent = shorten(report.hashCode);
   txValue.textContent = shorten(result.onChain.txHash);
   storageValue.textContent = `Saved row #${result.policy.id}`;
@@ -708,9 +811,6 @@ function renderProcessingResult(result) {
     `On-chain chunks: ${onChainData ? onChainData.documentChunkCount + onChainData.metadataChunkCount : 0}`,
     `Chain transactions: ${(result.onChain.transactions || []).length}`,
     report.summary,
-    `Covered: ${report.coveredTopics.join(", ") || "none"}`,
-    `Missing: ${report.missingTopics.join(", ") || "none"}`,
-    `Recommendation: ${report.recommendation}`,
     "",
     "On-chain metadata:",
     onChainData ? formatOnChainMetadata(onChainData) : "No on-chain metadata returned.",
@@ -873,10 +973,11 @@ function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
           <h3>Raw Policy Preview</h3>
           <span>${escapeHtml(String(rawFile.length))} characters</span>
         </div>
+        <p class="source-navigation-status" role="status" aria-live="polite">Select an evidence quote above to find it in the full policy.</p>
         <pre>${escapeHtml(rawPreview || "No raw policy text available.")}</pre>
         <details>
           <summary>Full Raw Policy</summary>
-          <pre>${escapeHtml(rawFile || "No raw policy text available.")}</pre>
+          <pre class="saved-policy-text">${escapeHtml(rawFile || "No raw policy text available.")}</pre>
         </details>
       </section>
     </section>
@@ -1004,12 +1105,12 @@ function complianceStatusLabel(status) {
 
 function renderMetadataGroupHtml(title, rows) {
   return `
-    <section class="metadata-group">
-      <h3>${escapeHtml(title)}</h3>
+    <details class="metadata-group">
+      <summary><h3>${escapeHtml(title)}</h3><span>${rows.length} fields</span></summary>
       <dl>
         ${rows.map(([label, value, evidenceKey]) => `
           <div>
-            <dt>${escapeHtml(label)}</dt>
+            <dt>${escapeHtml(label)}${reviewFieldHelp[evidenceKey] ? `<small>${escapeHtml(reviewFieldHelp[evidenceKey])}</small>` : ""}</dt>
             <dd>
               <span>${escapeHtml(displayValue(value))}</span>
               ${renderDetailsHtml(evidenceKey)}
@@ -1019,7 +1120,7 @@ function renderMetadataGroupHtml(title, rows) {
           </div>
         `).join("")}
       </dl>
-    </section>
+    </details>
   `;
 }
 
@@ -1039,7 +1140,6 @@ function metadataGroups(data, auditTitle = "On-chain Audit") {
     ["Identity", [
       ["Publisher", data.publisherEntity, ""],
       ["Service", data.serviceName, ""],
-      ["Policy URL", data.policyUrl, ""],
       ["Effective Date", data.effectiveDate, ""],
       ["Policy Version", data.policyVersion, ""],
     ]],
@@ -1104,13 +1204,27 @@ function renderEvidenceHtml(evidenceKey) {
     return "";
   }
   const evidence = currentEvidence && currentEvidence[evidenceKey];
-  const lines = evidenceLines(evidence);
+  const lines = reviewEvidenceLines(evidence);
   if (!lines.length) {
     return "";
   }
   return `<ul class="evidence-list">
-    ${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}
+    ${lines.map((line) => `<li><span>${escapeHtml(line)}</span><button type="button" class="evidence-jump" data-source-quote="${escapeHtml(line)}">View in policy ↗</button></li>`).join("")}
   </ul>`;
+}
+
+function jumpToSavedEvidence(event, container) {
+  const button = event.target.closest("[data-source-quote]");
+  if (!button) return false;
+  const fullText = container.querySelector(".raw-preview details");
+  if (!fullText) return true;
+  fullText.open = true;
+  locateEvidence(
+    fullText.querySelector(".saved-policy-text"),
+    button.dataset.sourceQuote,
+    container.querySelector(".source-navigation-status"),
+  );
+  return true;
 }
 
 function renderAssessmentHtml(assessmentKey, value) {
