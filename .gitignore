@@ -13,6 +13,7 @@ artifacts/
 cache/
 tests/
 test-results/
-result-rq2/
+recovered-rq2/
+rq3/
 .*.uploading.cfg
 data/base-sepolia/
