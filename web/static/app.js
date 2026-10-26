@@ -17,6 +17,9 @@ const queryPolicyPicker = document.querySelector("#queryPolicyPicker");
 const queryPolicySelect = document.querySelector("#queryPolicySelect");
 const recordsDetail = document.querySelector("#recordsDetail");
 const verificationBox = document.querySelector("#verificationBox");
+const verificationDetail = document.querySelector("#verificationDetail");
+const verificationDetailNote = document.querySelector("#verificationDetailNote");
+const verificationPolicyContent = document.querySelector("#verificationPolicyContent");
 const updateBox = document.querySelector("#updateBox");
 const selectedPolicyBox = document.querySelector("#selectedPolicyBox");
 const recordList = document.querySelector("#recordList");
@@ -37,6 +40,9 @@ const viewPages = document.querySelectorAll("[data-page]");
 let manageablePolicies = [];
 let listedPolicies = [];
 let queryPolicies = [];
+let verificationPolicies = [];
+let verificationResult = null;
+let verificationHistoryError = "";
 let chainRecordsByTx = new Map();
 let chainLookupError = "";
 let workflowBusy = false;
@@ -254,8 +260,20 @@ recordsDetail.addEventListener("click", (event) => {
   if (policy) selectRecordPolicy(policy);
 });
 
+verificationPolicyContent.addEventListener("click", (event) => {
+  if (jumpToSavedEvidence(event, verificationPolicyContent)) return;
+  const button = event.target.closest("[data-view-version]");
+  const policy = button && verificationPolicies.find((item) => String(item.id) === button.dataset.recordId);
+  if (policy) renderVerificationPolicyDetail(policy);
+});
+
 verifyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  verificationDetail.hidden = true;
+  verificationPolicyContent.textContent = "";
+  verificationPolicies = [];
+  verificationResult = null;
+  verificationHistoryError = "";
   if (!verifyForm.applicationName.value.trim()) {
     verificationBox.className = "verification fail";
     verificationBox.textContent = "Please enter the application name to verify.";
@@ -269,13 +287,19 @@ verifyForm.addEventListener("submit", async (event) => {
     return;
   }
   const payload = new FormData(verifyForm);
+  verificationBox.className = "verification";
+  verificationBox.textContent = "Verifying policy...";
   setBusy(true);
   try {
     const result = await postForm("/api/verify", payload);
-    renderVerification(result);
+    await renderVerification(result);
   } catch (error) {
-    verificationBox.className = "verification fail";
-    verificationBox.textContent = formatError(error);
+    if (error.details && error.details.verified === false) {
+      await renderVerification(error.details);
+    } else {
+      verificationBox.className = "verification fail";
+      verificationBox.textContent = formatError(error);
+    }
   } finally {
     setBusy(false);
   }
@@ -817,21 +841,74 @@ function renderProcessingResult(result) {
   ].join("\n");
 }
 
-function renderVerification(result) {
+async function renderVerification(result) {
+  renderVerificationSummary(result);
+  if (!result.stored) return;
+
+  verificationResult = result;
+  verificationDetail.hidden = false;
+  verificationPolicyContent.textContent = "Loading stored policy details...";
+  try {
+    const path = `/api/policies?applicationName=${encodeURIComponent(result.stored.policyName)}`;
+    const [response] = await Promise.all([fetch(path), loadChainRecords()]);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Could not load policy versions");
+    verificationPolicies = [
+      result.stored,
+      ...(payload.policies || []).filter((policy) =>
+        policy.policyId === result.stored.policyId && Number(policy.id) < Number(result.stored.id)
+      ),
+    ];
+  } catch (error) {
+    verificationPolicies = [];
+    verificationHistoryError = "Previous versions could not be loaded.";
+  }
+  renderVerificationSummary(result);
+  renderVerificationPolicyDetail(result.stored);
+}
+
+function verificationVersionLabel(policy) {
+  const index = verificationPolicies.findIndex((version) => String(version.id) === String(policy.id));
+  return index < 0
+    ? ""
+    : `Version ${verificationPolicies.length - index} of ${verificationPolicies.length}`;
+}
+
+function renderVerificationSummary(result) {
   verificationBox.className = `verification ${result.verified ? "pass" : "fail"}`;
-  const comparisons = Object.entries(result.comparisons)
+  const comparisons = Object.entries(result.comparisons || {})
     .map(([name, value]) => `${name}: ${value ? "pass" : "fail"}`)
     .join("\n");
+  const storedHash = result.sqlHash || (result.stored && result.stored.hashCode);
+  const storedVersion = result.stored && [
+    verificationVersionLabel(result.stored),
+    result.stored.policyVersion,
+  ].filter(Boolean).join(" · ");
   verificationBox.textContent = [
     result.verified ? "Verified trusted policy record." : "Verification failed.",
     result.reason,
     result.stored ? `Application Name: ${displayPolicyName(result.stored)}` : "",
-    result.stored ? `Uploaded: ${result.stored.policyVersion}` : "",
+    result.stored ? `Policy ID: ${result.stored.policyId}` : "",
+    result.stored ? `${result.verified ? "Verified against saved version" : "Compared with saved version"}: ${storedVersion}` : "Saved version: none",
     comparisons,
     result.normalization ? `Text comparison: ${result.normalization}` : "",
     typeof result.exactHashesMatch === "boolean" ? `Exact file hash matches stored record: ${result.exactHashesMatch ? "yes" : "no"}` : "",
-    `Stored hash: ${shorten(result.sqlHash)}`,
+    storedHash ? `Stored hash: ${shorten(storedHash)}` : "",
   ].filter(Boolean).join("\n");
+}
+
+function renderVerificationPolicyDetail(policy) {
+  const isComparedVersion = String(policy.id) === String(verificationResult.stored.id);
+  const onChain = isComparedVersion ? verificationResult.onChain : findOnChainRecord(policy);
+  const data = mergeMetadata(onChain && onChain.data, metadataFallback(policy));
+  const note = isComparedVersion
+    ? verificationResult.verified
+      ? "The submitted policy matches this saved version and its on-chain record."
+      : "This is the saved version used for comparison. The verification request did not pass."
+    : `Viewing ${verificationVersionLabel(policy)} (${policy.policyVersion}) for reference. The verification result above applies only to ${verificationVersionLabel(verificationResult.stored)} (${verificationResult.stored.policyVersion}).`;
+  verificationDetailNote.textContent = [note, verificationHistoryError].filter(Boolean).join(" ");
+  verificationPolicyContent.innerHTML = renderPolicyDetailHtml(policy, onChain, data, verificationPolicies);
+  void hydrateCompliancePanel(verificationPolicyContent, onChain);
 }
 
 function setBusy(isBusy) {
@@ -959,7 +1036,7 @@ function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
         <div class="record-key">${escapeHtml(shorten(policy.recordKey || (onChain && onChain.recordKey) || "")) || "no record key"}</div>
       </div>
 
-      ${renderVersionNavigationHtml(policy, versions)}
+      ${versions.length ? renderVersionNavigationHtml(policy, versions) : ""}
       ${renderRegistrationReceiptHtml(policy, onChain)}
 
       <div class="metadata-grid-detail">

@@ -155,8 +155,15 @@
               <textarea name="rawText" placeholder="Paste policy text to verify"></textarea>
             </label>
             <button class="secondary" type="submit">Verify Policy</button>
-            <div class="verification" id="verificationBox">No verification request yet.</div>
+            <div class="verification" id="verificationBox" role="status" aria-live="polite">No verification request yet.</div>
           </form>
+          <section class="panel verification-detail" id="verificationDetail" hidden>
+            <div class="panel-heading">
+              <h2>Stored Policy Record</h2>
+            </div>
+            <p class="verification-detail-note" id="verificationDetailNote"></p>
+            <div class="policy-fulltext" id="verificationPolicyContent"></div>
+          </section>
         </section>
 
         <section class="view-page" data-page="update" hidden>

@@ -137,7 +137,6 @@ h2 {
   align-items: start;
 }
 
-.view-page[data-page="verify"],
 .view-page[data-page="update"],
 .view-page[data-page="review"] {
   max-width: 760px;
@@ -148,12 +147,26 @@ h2 {
 }
 
 .view-page[data-page="query"],
+.view-page[data-page="verify"],
 .view-page[data-page="records"] {
   max-width: 1320px;
 }
 
+.view-page[data-page="verify"] .verifier {
+  max-width: 760px;
+}
+
 .view-page[data-page="query"] .query {
   max-width: none;
+}
+
+.verification-detail {
+  margin-top: 18px;
+}
+
+.verification-detail-note {
+  margin: 8px 0 16px;
+  color: var(--muted);
 }
 
 .records-layout {
