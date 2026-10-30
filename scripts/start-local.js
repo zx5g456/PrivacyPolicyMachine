@@ -1,7 +1,11 @@
 import { access } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { Contract, FetchRequest, JsonRpcProvider, Wallet, getAddress, keccak256 } from "ethers";
+import {
+  BASE_CHAIN_ID, assertBaseChainId, loadBaseEnv, publisherWallets, required,
+} from "../config/load-base-env.js";
 
-const rpcUrl = process.env.RPC_URL ?? "http://127.0.0.1:8545";
 const children = new Set();
 let stopping = false;
 
@@ -50,22 +54,47 @@ function run(label, executable, args, options = {}) {
   });
 }
 
-async function waitForRpc(timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(rpcUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
-      });
-      if (response.ok) return;
-    } catch {
-      // The node is still starting.
+async function verifyBaseDeployment(publishers, complianceAddress) {
+  assertBaseChainId();
+  const request = new FetchRequest(required("RPC_URL"));
+  request.timeout = 30_000;
+  const provider = new JsonRpcProvider(request, undefined, { batchMaxCount: 1 });
+  try {
+    const network = await provider.getNetwork();
+    if (network.chainId !== BASE_CHAIN_ID) {
+      throw new Error(`RPC returned chain ID ${network.chainId}; expected Base Mainnet ${BASE_CHAIN_ID}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    const contractAddress = getAddress(required("CONTRACT_ADDRESS"));
+    const block = Number(required("CONTRACT_DEPLOYMENT_BLOCK"));
+    if (!Number.isSafeInteger(block) || block < 1 || block > await provider.getBlockNumber()) {
+      throw new Error("CONTRACT_DEPLOYMENT_BLOCK must be a mined Base Mainnet block");
+    }
+    const code = await provider.getCode(contractAddress);
+    if (code === "0x") {
+      throw new Error(`No contract bytecode found at ${contractAddress} on Base Mainnet`);
+    }
+    const expectedCodeHash = required("CONTRACT_RUNTIME_CODE_HASH");
+    if (keccak256(code).toLowerCase() !== expectedCodeHash.toLowerCase()) {
+      throw new Error(`CONTRACT_RUNTIME_CODE_HASH does not match the code at ${contractAddress}`);
+    }
+    const registry = new Contract(contractAddress, [
+      "function owner() view returns (address)",
+      "function getPublisherOwner(string) view returns (address)",
+      "function complianceUploaders(address) view returns (bool)",
+    ], provider);
+    await registry.owner();
+    if (!(await registry.complianceUploaders(complianceAddress))) {
+      throw new Error(`Compliance wallet ${complianceAddress} is not authorized on the contract`);
+    }
+    for (const [name, address] of Object.entries(publishers)) {
+      if ((await registry.getPublisherOwner(name)).toLowerCase() !== address.toLowerCase()) {
+        throw new Error(`Publisher ${name} is not authorized as ${address} on the contract`);
+      }
+    }
+    return { contractAddress, block };
+  } finally {
+    provider.destroy();
   }
-  throw new Error(`Local Ethereum RPC did not start at ${rpcUrl}`);
 }
 
 async function shutdown(exitCode = 0) {
@@ -85,57 +114,52 @@ async function shutdown(exitCode = 0) {
 }
 
 async function main() {
+  await loadBaseEnv();
   const python = process.platform === "win32" ? ".venv\\Scripts\\python.exe" : ".venv/bin/python";
-  const complianceUploaderAccount = process.env.COMPLIANCE_UPLOADER_ACCOUNT ?? "1";
+  const publishers = publisherWallets();
+  let complianceAddress;
+  try {
+    complianceAddress = new Wallet(required("COMPLIANCE_PRIVATE_KEY")).address;
+  } catch {
+    throw new Error("COMPLIANCE_PRIVATE_KEY must be a valid private key in config/base-mainnet.env");
+  }
+  required("OPENAI_API_KEY");
   await access(python).catch(() => {
     throw new Error(`Python virtual environment not found at ${python}. Create it and install requirements first.`);
   });
 
+  const compileEnv = { ...process.env };
+  delete compileEnv.BASE_DEPLOYER_PRIVATE_KEY;
+  delete compileEnv.COMPLIANCE_PRIVATE_KEY;
+  delete compileEnv.OPENAI_API_KEY;
   console.log("Compiling Solidity contract...");
-  await run("contract compilation", command("npm"), ["run", "contract:compile"]);
+  await run("contract compilation", command("npm"), ["run", "contract:compile"], { env: compileEnv });
 
-  console.log("Starting local Hardhat chain...");
-  start("Hardhat chain", command("npm"), ["run", "chain"]);
-  await waitForRpc();
-
-  console.log("Deploying TrustedPolicyRegistry...");
-  const deployOutput = await run(
-    "contract deployment",
-    command("npm"),
-    ["run", "contract:deploy"],
-    {
-      capture: true,
-      env: {
-        ...process.env,
-        RPC_URL: rpcUrl,
-        COMPLIANCE_UPLOADER_ACCOUNT: complianceUploaderAccount,
-      },
-    },
-  );
-  const address = deployOutput.match(/TrustedPolicyRegistry deployed to:\s*(0x[a-fA-F0-9]{40})/)?.[1];
-  if (!address) throw new Error("Could not read CONTRACT_ADDRESS from deployment output");
-  const deploymentBlock = deployOutput.match(/CONTRACT_DEPLOYMENT_BLOCK=(\d+)/)?.[1];
-  if (!deploymentBlock) throw new Error("Could not read CONTRACT_DEPLOYMENT_BLOCK from deployment output");
+  console.log("Checking Base Mainnet contract and wallet authorizations...");
+  const { contractAddress, block } = await verifyBaseDeployment(publishers, complianceAddress);
 
   const sharedEnv = {
     ...process.env,
-    RPC_URL: rpcUrl,
-    CONTRACT_ADDRESS: address,
-    CONTRACT_DEPLOYMENT_BLOCK: deploymentBlock,
-    COMPLIANCE_UPLOADER_ACCOUNT: complianceUploaderAccount,
+    CONTRACT_ADDRESS: contractAddress,
+    CONTRACT_DEPLOYMENT_BLOCK: String(block),
+    LISTENER_STATE_PATH: process.env.LISTENER_STATE_PATH ??
+      fileURLToPath(new URL("../data/base-mainnet/listener-state.json", import.meta.url)),
   };
+  delete sharedEnv.BASE_DEPLOYER_PRIVATE_KEY;
+  const serverEnv = { ...sharedEnv };
+  delete serverEnv.COMPLIANCE_PRIVATE_KEY;
+  delete serverEnv.OPENAI_API_KEY;
 
-  console.log("Starting off-chain listener and web server...");
+  console.log("Starting local listener and web server on Base Mainnet...");
   start("event listener", command("npm"), ["start"], {
     cwd: new URL("../offchain-listener", import.meta.url),
     env: sharedEnv,
   });
-  start("web server", python, ["-m", "server.app"], { env: sharedEnv });
+  start("web server", python, ["-m", "server.app"], { env: serverEnv });
 
-  console.log("\nLocal environment is ready:");
-  console.log(`  RPC_URL=${rpcUrl}`);
-  console.log(`  CONTRACT_ADDRESS=${address}`);
-  console.log(`  CONTRACT_DEPLOYMENT_BLOCK=${deploymentBlock}`);
+  console.log("\nLocal services are ready for Base Mainnet:");
+  console.log(`  CONTRACT_ADDRESS=${contractAddress}`);
+  console.log(`  CONTRACT_DEPLOYMENT_BLOCK=${block}`);
   console.log("  Open the web URL printed by the Python server.");
   console.log("  Press Ctrl+C to stop everything.\n");
 }

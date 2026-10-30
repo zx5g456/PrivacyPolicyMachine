@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { Contract, JsonRpcProvider, concat, sha256 } from "ethers";
-
-const rpcUrl = process.env.RPC_URL ?? "http://127.0.0.1:8545";
-const contractAddress = process.env.CONTRACT_ADDRESS;
-if (!contractAddress) {
-  throw new Error("CONTRACT_ADDRESS is required");
-}
+import hre from "hardhat";
+import { BrowserProvider, ContractFactory, concat, sha256 } from "ethers";
 
 const artifact = JSON.parse(
   await readFile(
@@ -17,10 +12,14 @@ const artifact = JSON.parse(
     "utf8",
   ),
 );
-const provider = new JsonRpcProvider(rpcUrl);
+const connection = await hre.network.create();
+const provider = new BrowserProvider(connection.provider);
 const owner = await provider.getSigner(0);
 const unauthorized = await provider.getSigner(1);
-const registry = new Contract(contractAddress, artifact.abi, owner);
+const registry = await new ContractFactory(artifact.abi, artifact.bytecode, owner).deploy(
+  await owner.getAddress(),
+);
+await registry.waitForDeployment();
 
 const document = Buffer.from("integration-test privacy policy", "utf8");
 const metadata = Buffer.from('{"test":true}', "utf8");
@@ -40,22 +39,30 @@ const recordKey = await registry.getRecordKey(
   manifest.policyVersion,
 );
 
+await assert.rejects(
+  registry.connect(unauthorized).beginPolicyRegistration(manifest),
+  /authorized publisher owner|execution reverted/i,
+);
+await (await registry.setPublisherOwner(manifest.publisherEntity, await owner.getAddress())).wait();
 await (await registry.beginPolicyRegistration(manifest)).wait();
 await (await registry.appendDocumentChunk(recordKey, 0, document)).wait();
 await (await registry.appendMetadataChunk(recordKey, 0, metadata)).wait();
 await (await registry.finalizePolicyRegistration(recordKey)).wait();
-
-if (process.env.POLICY_ONLY === "1") {
-  console.log(
-    JSON.stringify({
-      recordKey,
-      documentHash: manifest.documentHash,
-      document: document.toString("utf8"),
-    }),
-  );
-  provider.destroy();
-  process.exit(0);
-}
+const registered = await registry.readRecordByKey(recordKey);
+assert.equal(await registry.registeredDocumentCommitments(registered.documentChunkCommitment), true);
+const duplicateKey = await registry.getRecordKey(
+  manifest.publisherEntity,
+  manifest.serviceName,
+  "duplicate-document",
+);
+await (await registry.beginPolicyRegistration({ ...manifest, policyVersion: "duplicate-document" })).wait();
+await (await registry.appendDocumentChunk(duplicateKey, 0, document)).wait();
+await (await registry.appendMetadataChunk(duplicateKey, 0, metadata)).wait();
+await assert.rejects(
+  registry.finalizePolicyRegistration(duplicateKey),
+  /Document content commitment already registered|execution reverted/i,
+);
+await (await registry.cancelPolicyRegistration(duplicateKey)).wait();
 
 const bundle = Buffer.from("deterministic compliance bundle bytes", "utf8");
 const complianceManifest = {
@@ -94,4 +101,4 @@ await assert.rejects(
 );
 
 console.log(`Compliance contract integration passed for ${recordKey}`);
-provider.destroy();
+await connection.close();

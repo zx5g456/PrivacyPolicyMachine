@@ -11,9 +11,9 @@ __pycache__/
 node_modules/
 artifacts/
 cache/
-tests/
 test-results/
 recovered-rq2/
 rq3/
 .*.uploading.cfg
-data/base-sepolia/
+data/base-mainnet/
+config/base-mainnet.env

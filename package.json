@@ -5,13 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-local.js",
-    "chain": "hardhat node",
-    "contract:compile": "hardhat compile",
-    "contract:deploy": "node scripts/deploy-contract.js",
-    "sepolia:wallet": "node scripts/base-sepolia.js wallet",
-    "sepolia:status": "node scripts/base-sepolia.js status",
-    "sepolia:deploy": "node scripts/base-sepolia.js deploy",
-    "contract:test-compliance": "node scripts/test-compliance-contract.js"
+    "contract:compile": "node scripts/compile-contract.js",
+    "base:status": "node scripts/base-mainnet.js status",
+    "base:deploy": "node scripts/base-mainnet.js deploy",
+    "contract:test-security": "npm run contract:compile && node scripts/test-registry-security.js",
+    "contract:test-compliance": "npm run contract:compile && node scripts/test-compliance-contract.js"
   },
   "devDependencies": {
     "ethers": "^6.16.0",

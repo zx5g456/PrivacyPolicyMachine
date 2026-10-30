@@ -3,11 +3,21 @@ pragma solidity ^0.8.24;
 
 contract TrustedPolicyRegistry {
     uint256 public constant MAX_CHUNK_BYTES = 24 * 1024;
-    address public immutable owner;
+    uint256 public constant MAX_DOCUMENT_BYTES = 256 * 1024;
+    uint256 public constant MAX_METADATA_BYTES = 128 * 1024;
+    uint256 public constant MAX_COMPLIANCE_BUNDLE_BYTES = 1024 * 1024;
+    address public owner;
+    address public pendingOwner;
 
     mapping(address => bool) public complianceUploaders;
+    mapping(bytes32 => address) public publisherOwners;
+    // Derived from stored chunk bytes, indices and sizes. Different chunk layouts have
+    // different commitments even when they reconstruct to the same document.
+    mapping(bytes32 => bool) public registeredDocumentCommitments;
 
     struct RegistrationManifest {
+        // Full-file SHA-256 claims. Readers must reconstruct the stored chunks and
+        // compare their hashes; doing that entire read in one transaction exceeds gas limits.
         bytes32 documentHash;
         bytes32 metadataHash;
         uint64 documentSize;
@@ -57,6 +67,7 @@ contract TrustedPolicyRegistry {
     }
 
     struct ComplianceManifest {
+        // The bundle hash is checked by readers after reconstructing the on-chain chunks.
         bytes32 bundleHash;
         bytes32 sourceDocumentHash;
         bytes32 pipelineVersionHash;
@@ -97,6 +108,14 @@ contract TrustedPolicyRegistry {
     mapping(bytes32 => PendingComplianceUpload) private pendingComplianceUploads;
     mapping(bytes32 => mapping(uint32 => bytes)) private complianceChunks;
     mapping(bytes32 => bool) private complianceExists;
+
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed pendingOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event PublisherOwnerUpdated(
+        bytes32 indexed publisherKey,
+        string publisherEntity,
+        address indexed publisherWallet
+    );
 
     event PolicyUploadStarted(
         bytes32 indexed recordKey,
@@ -153,10 +172,12 @@ contract TrustedPolicyRegistry {
         uint64 registeredAt
     );
 
-    constructor() {
-        owner = msg.sender;
-        complianceUploaders[msg.sender] = true;
-        emit ComplianceUploaderUpdated(msg.sender, true);
+    constructor(address initialOwner) {
+        require(initialOwner != address(0), "Owner is required");
+        owner = initialOwner;
+        complianceUploaders[initialOwner] = true;
+        emit OwnershipTransferred(address(0), initialOwner);
+        emit ComplianceUploaderUpdated(initialOwner, true);
     }
 
     modifier onlyOwner() {
@@ -167,6 +188,38 @@ contract TrustedPolicyRegistry {
     modifier onlyComplianceUploader() {
         require(complianceUploaders[msg.sender], "Not an authorized compliance uploader");
         _;
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Owner is required");
+        require(newOwner != owner, "Owner is unchanged");
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "Only pending owner can accept ownership");
+        address previousOwner = owner;
+        owner = msg.sender;
+        pendingOwner = address(0);
+        complianceUploaders[previousOwner] = false;
+        complianceUploaders[msg.sender] = true;
+        emit OwnershipTransferred(previousOwner, msg.sender);
+        emit ComplianceUploaderUpdated(previousOwner, false);
+        emit ComplianceUploaderUpdated(msg.sender, true);
+    }
+
+    function setPublisherOwner(string calldata publisherEntity, address publisherWallet)
+        external onlyOwner
+    {
+        require(bytes(publisherEntity).length > 0, "publisherEntity is required");
+        bytes32 publisherKey = getPublisherKey(publisherEntity);
+        publisherOwners[publisherKey] = publisherWallet;
+        emit PublisherOwnerUpdated(publisherKey, publisherEntity, publisherWallet);
+    }
+
+    function getPublisherOwner(string calldata publisherEntity) external view returns (address) {
+        return publisherOwners[getPublisherKey(publisherEntity)];
     }
 
     function setComplianceUploader(address uploader, bool authorized) external onlyOwner {
@@ -182,9 +235,15 @@ contract TrustedPolicyRegistry {
         require(manifest.metadataHash != bytes32(0), "metadataHash is required");
         require(manifest.documentSize > 0, "documentSize is required");
         require(manifest.metadataSize > 0, "metadataSize is required");
+        require(manifest.documentSize <= MAX_DOCUMENT_BYTES, "Document exceeds maximum size");
+        require(manifest.metadataSize <= MAX_METADATA_BYTES, "Metadata exceeds maximum size");
         require(bytes(manifest.publisherEntity).length > 0, "publisherEntity is required");
         require(bytes(manifest.serviceName).length > 0, "serviceName is required");
         require(bytes(manifest.policyVersion).length > 0, "policyVersion is required");
+        require(
+            publisherOwners[getPublisherKey(manifest.publisherEntity)] == msg.sender,
+            "Not the authorized publisher owner"
+        );
 
         recordKey = getRecordKey(manifest.publisherEntity, manifest.serviceName, manifest.policyVersion);
         require(!exists[recordKey], "Policy record already exists");
@@ -260,6 +319,10 @@ contract TrustedPolicyRegistry {
         require(pending.metadataBytesStored == pending.metadataSize, "Metadata upload is incomplete");
         require(pending.documentChunkCount > 0, "Document chunks are required");
         require(pending.metadataChunkCount > 0, "Metadata chunks are required");
+        require(
+            !registeredDocumentCommitments[pending.documentChunkCommitment],
+            "Document content commitment already registered"
+        );
 
         bytes32 policyKey = getPolicyKey(pending.publisherEntity, pending.serviceName);
         bytes32 previousRecordKey = latestRecordKeyByPolicy[policyKey];
@@ -285,6 +348,7 @@ contract TrustedPolicyRegistry {
         record.hasPreviousReference = hasPreviousReference;
 
         exists[recordKey] = true;
+        registeredDocumentCommitments[pending.documentChunkCommitment] = true;
         latestRecordKeyByPolicy[policyKey] = recordKey;
         recordKeysByPolicy[policyKey].push(recordKey);
 
@@ -301,7 +365,12 @@ contract TrustedPolicyRegistry {
     }
 
     function cancelPolicyRegistration(bytes32 recordKey) external {
-        PendingUpload storage pending = _ownedPendingUpload(recordKey);
+        PendingUpload storage pending = pendingUploads[recordKey];
+        require(pending.active, "Policy upload not found");
+        require(
+            pending.registrant == msg.sender || msg.sender == owner,
+            "Only the registrant or owner can cancel this upload"
+        );
         address registrant = pending.registrant;
         delete pendingUploads[recordKey];
         emit PolicyUploadCancelled(recordKey, registrant);
@@ -316,6 +385,7 @@ contract TrustedPolicyRegistry {
         require(manifest.bundleHash != bytes32(0), "bundleHash is required");
         require(manifest.pipelineVersionHash != bytes32(0), "pipelineVersionHash is required");
         require(manifest.bundleSize > 0, "bundleSize is required");
+        require(manifest.bundleSize <= MAX_COMPLIANCE_BUNDLE_BYTES, "Compliance bundle exceeds maximum size");
         require(
             manifest.sourceDocumentHash == records[recordKey].documentHash,
             "Compliance source document does not match policy"
@@ -511,10 +581,18 @@ contract TrustedPolicyRegistry {
         return keccak256(abi.encode(publisherEntity, serviceName));
     }
 
+    function getPublisherKey(string memory publisherEntity) public pure returns (bytes32) {
+        return keccak256(bytes(publisherEntity));
+    }
+
     function _ownedPendingUpload(bytes32 recordKey) private view returns (PendingUpload storage pending) {
         pending = pendingUploads[recordKey];
         require(pending.active, "Policy upload not found");
         require(pending.registrant == msg.sender, "Only the registrant can modify this upload");
+        require(
+            publisherOwners[getPublisherKey(pending.publisherEntity)] == msg.sender,
+            "Not the authorized publisher owner"
+        );
     }
 
     function _ownedPendingComplianceUpload(bytes32 recordKey)

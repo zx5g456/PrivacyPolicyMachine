@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .blockchain import OnChainData, TrustedPolicyRegistry
+from .chain_store import ChainPolicyStore
 from .compliance_bundle import read_compliance_bundle
 from .llm_client import DEFAULT_MODEL
 from .llm_models import (
@@ -36,16 +37,15 @@ from .processor import (
     normalize_policy_text,
     require_canonical_metadata_keys,
 )
-from .storage import PolicyStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data"
 STATIC_DIR = ROOT / "web" / "static"
-store = PolicyStore(DATA_DIR / "policies.db")
+MAX_HTTP_BODY_BYTES = 2 * 1024 * 1024
 registry = TrustedPolicyRegistry(
     ROOT / "artifacts" / "contracts" / "TrustedPolicyRegistry.sol" / "TrustedPolicyRegistry.json"
 )
+store = ChainPolicyStore(registry)
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -54,7 +54,17 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/policies":
+            if parsed.path == "/api/config":
+                publishers = json.loads(os.environ.get("PUBLISHER_WALLETS_JSON", "{}"))
+                if not isinstance(publishers, dict):
+                    raise RuntimeError("PUBLISHER_WALLETS_JSON must be a JSON object")
+                self._json({
+                    "chainId": 8453,
+                    "contractAddress": registry.contract.address,
+                    "rpcUrl": "https://mainnet.base.org",
+                    "publisherWallets": publishers,
+                })
+            elif parsed.path == "/api/policies":
                 query = parse_qs(parsed.query)
                 application_name = self._optional_query(query, "applicationName")
                 self._json({"policies": store.list_policies(application_name)})
@@ -62,20 +72,33 @@ class AppHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 developer_name = self._optional_query(query, "developer")
                 self._json({"policies": store.list_manageable_policies(developer_name)})
+            elif parsed.path.startswith("/api/records/") and parsed.path.endswith("/raw"):
+                record_key = unquote(parsed.path[len("/api/records/"):-len("/raw")])
+                content = registry.read_on_chain_content(record_key)
+                record = registry.read_record_by_key(record_key)
+                registry._require_content_matches_record(content, record.data)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="policy-{record.recordKey[2:]}.bin"',
+                )
+                self.send_header("Content-Length", str(len(content.rawFile)))
+                self.end_headers()
+                self.wfile.write(content.rawFile)
             elif parsed.path.startswith("/api/policies/"):
                 policy_id = unquote(parsed.path.removeprefix("/api/policies/"))
                 policy = store.get_latest(policy_id)
                 if not policy:
                     self._json({"error": "Policy not found"}, HTTPStatus.NOT_FOUND)
                     return
-                chain_record = registry.read_on_chain_record(
-                    policy["developerName"],
-                    policy["policyName"],
-                    policy["policyVersion"],
-                )
+                chain_record = registry.read_record_by_key(policy["recordKey"])
                 self._json({"policy": policy, "onChain": self._chain_to_dict(chain_record)})
             elif parsed.path == "/api/chain":
-                self._json({"records": [self._chain_to_dict(item) for item in registry.list_records()]})
+                self._json({
+                    "records": [self._chain_to_dict(item) for item in store.list_chain_records()],
+                    "auditIssues": store.list_audit_issues(),
+                })
             elif parsed.path.startswith("/api/audit/"):
                 tx_hash = unquote(parsed.path.removeprefix("/api/audit/"))
                 self._json(registry.audit_registration(tx_hash))
@@ -95,10 +118,10 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             payload = self._read_payload()
-            if parsed.path == "/api/policies/reviewed":
-                self._register_reviewed_policy(payload)
-            elif parsed.path == "/api/policies/update":
-                self._update_policy(payload)
+            if parsed.path == "/api/policies/prepare":
+                self._prepare_policy(payload)
+            elif parsed.path == "/api/policies/complete":
+                self._complete_policy(payload)
             elif parsed.path == "/api/verify":
                 self._verify_policy(payload)
             elif parsed.path == "/api/analyze":
@@ -117,69 +140,58 @@ class AppHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    def _update_policy(self, payload: dict[str, Any]) -> None:
-        policy_id = self._required(payload, "policyId")
-        developer_name = self._developer_name(payload)
+    def _prepare_policy(self, payload: dict[str, Any]) -> None:
+        """Prepare contract calls for the connected developer wallet to pay and sign."""
+        workflow = self._required(payload, "workflow")
+        if workflow not in {"create", "update"}:
+            raise ValueError("workflow must be create or update")
         raw_file = self._raw_file(payload, required=True)
         raw_bytes = self._raw_file_bytes(payload, raw_file)
-        existing = store.get_latest(policy_id)
-        if not existing:
-            self._json({"error": "Policy ID not found. Create the policy first."}, HTTPStatus.NOT_FOUND)
-            return
-        if existing.get("developerName", "").lower() != developer_name.lower():
-            self._json({"error": "Only the developer who uploaded this application policy can update it."}, HTTPStatus.FORBIDDEN)
-            return
         metadata = self._reviewed_metadata(payload)
-        reviewed_policy_id, policy_version = self._review_registration_identity(metadata)
-        if reviewed_policy_id != policy_id:
-            raise ValueError("Reviewed metadata does not belong to the selected policy")
+        policy_id, policy_version = self._review_registration_identity(metadata)
+        developer_name = self._developer_name(payload)
+        wallet_address = self._required(payload, "walletAddress")
         hash_code = hash_policy_bytes(raw_bytes)
+        existing = store.get_latest(policy_id)
+        if workflow == "update":
+            if not existing:
+                raise ValueError("Policy ID not found on Base Mainnet")
+            if self._required(payload, "policyId") != policy_id:
+                raise ValueError("Reviewed metadata does not belong to the selected policy")
+            if existing["developerName"].casefold() != developer_name.casefold():
+                raise ValueError("Only the original developer may update this policy")
+            policy_name = existing["policyName"]
+            existing_metadata = existing["metadata"]
+            policy_url = self._optional_payload(payload, "policyUrl") or existing_metadata.get("policyUrl", "")
+            effective_date = self._optional_payload(payload, "effectiveDate") or existing_metadata.get("effectiveDate", "")
+            change_summary = self._optional_payload(payload, "changeSummary")
+        else:
+            requested_name = self._application_name(payload)
+            if existing and (
+                existing["policyVersion"] != policy_version
+                or existing["developerName"].casefold() != developer_name.casefold()
+                or existing["policyName"] != requested_name
+            ):
+                raise ValueError("Reviewed policy ID belongs to another registration")
+            for policy in store.list_policies(requested_name):
+                if (
+                    policy["developerName"].casefold() == developer_name.casefold()
+                    and policy["policyName"].casefold() == requested_name.casefold()
+                    and policy["policyId"] != policy_id
+                ):
+                    raise ValueError("This developer already has a policy for the application; use Update Policy")
+            policy_name = requested_name
+            policy_url = self._optional_payload(payload, "policyUrl")
+            effective_date = self._optional_payload(payload, "effectiveDate")
+            change_summary = ""
+
         duplicate = store.get_by_hash(hash_code)
-        if duplicate:
+        if duplicate and not (
+            duplicate["policyId"] == policy_id
+            and duplicate["policyVersion"] == policy_version
+        ):
             self._duplicate_hash_response(duplicate, hash_code)
             return
-        existing_metadata = existing.get("metadata", {})
-        policy, metadata, report, chain_record = self._register_policy_version(
-            policy_id=policy_id,
-            policy_name=existing["policyName"],
-            policy_version=policy_version,
-            developer_name=developer_name,
-            raw_file=raw_file,
-            raw_bytes=raw_bytes,
-            hash_code=hash_code,
-            policy_url=self._optional_payload(payload, "policyUrl") or existing_metadata.get("policyUrl", ""),
-            effective_date=self._optional_payload(payload, "effectiveDate") or existing_metadata.get("effectiveDate", ""),
-            change_summary=self._optional_payload(payload, "changeSummary"),
-            reviewed_metadata=metadata,
-        )
-        self._json(
-            {
-                "policy": policy,
-                "metadata": metadata,
-                "report": report,
-                "onChain": self._chain_to_dict(chain_record),
-                "message": "Policy updated, stored, and registered.",
-            },
-            HTTPStatus.CREATED,
-        )
-
-    def _register_policy_version(
-        self,
-        policy_id: str,
-        policy_name: str,
-        policy_version: str,
-        developer_name: str,
-        raw_file: str,
-        raw_bytes: bytes,
-        hash_code: str,
-        policy_url: str,
-        effective_date: str,
-        change_summary: str,
-        reviewed_metadata: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any]:
-        if reviewed_metadata is None:
-            raise ValueError("AI-reviewed metadata is required for registration")
-        metadata = reviewed_metadata
         require_canonical_metadata_keys(metadata)
         metadata["policyId"] = policy_id
         metadata["policyVersion"] = policy_version
@@ -195,79 +207,42 @@ class AppHandler(BaseHTTPRequestHandler):
         metadata.setdefault("permittedUsage", [])
         metadata.setdefault("metadataDetails", {})
         metadata_bytes = canonical_metadata_bytes(metadata)
-        metadata_hash = hash_policy_bytes(metadata_bytes)
-        report = generate_report(metadata, hash_code)
-        chain_record = registry.register_trusted_policy_record(
-            self._on_chain_data(raw_bytes, metadata_bytes, metadata)
+        plan = registry.prepare_policy_transactions(
+            self._on_chain_data(raw_bytes, metadata_bytes, metadata), wallet_address
         )
-        if chain_record.data.documentHash != "0x" + hash_code:
-            raise RuntimeError("Contract document hash does not match the uploaded file")
-        if chain_record.data.metadataHash != "0x" + metadata_hash:
-            raise RuntimeError("Contract metadata hash does not match the canonical metadata")
-        policy = store.create_policy(
-            policy_id=policy_id,
-            policy_name=policy_name,
-            policy_version=policy_version,
-            developer_name=developer_name,
-            raw_file=raw_file,
-            hash_code=hash_code,
-            metadata_hash=metadata_hash,
-            metadata=metadata,
-            report=report,
-            tx_hash=chain_record.txHash,
-            record_key=chain_record.recordKey,
-            block_number=chain_record.blockNumber,
-            block_hash=chain_record.blockHash,
-            contract_address=chain_record.contractAddress,
-            chain_id=chain_record.chainId,
-            chain_transactions=[asdict(transaction) for transaction in chain_record.transactions],
-            document_chunk_count=chain_record.data.documentChunkCount,
-            metadata_chunk_count=chain_record.data.metadataChunkCount,
-            document_size=chain_record.data.documentSize,
-            metadata_size=chain_record.data.metadataSize,
-            document_chunk_commitment=chain_record.data.documentChunkCommitment,
-            metadata_chunk_commitment=chain_record.data.metadataChunkCommitment,
-        )
-        return policy, metadata, report, chain_record
-
-    def _register_reviewed_policy(self, payload: dict[str, Any]) -> None:
-        """Persist AI metadata approved or edited on the review page."""
-        raw_file = self._raw_file(payload, required=True)
-        raw_bytes = self._raw_file_bytes(payload, raw_file)
-        metadata = self._reviewed_metadata(payload)
-        policy_id, policy_version = self._review_registration_identity(metadata)
-        if store.get_latest(policy_id):
-            raise ValueError("Reviewed policy ID is already registered")
-        application_name = self._application_name(payload)
-        developer_name = self._developer_name(payload)
-        hash_code = hash_policy_bytes(raw_bytes)
-        duplicate = store.get_by_hash(hash_code)
-        if duplicate:
-            self._duplicate_hash_response(duplicate, hash_code)
-            return
-        policy, metadata, report, chain_record = self._register_policy_version(
-            policy_id=policy_id,
-            policy_name=application_name,
-            policy_version=policy_version,
-            developer_name=developer_name,
-            raw_file=raw_file,
-            raw_bytes=raw_bytes,
-            hash_code=hash_code,
-            policy_url=self._optional_payload(payload, "policyUrl"),
-            effective_date=self._optional_payload(payload, "effectiveDate"),
-            change_summary="",
-            reviewed_metadata=metadata,
-        )
-        self._json(
-            {
-                "policy": policy,
-                "metadata": metadata,
-                "report": report,
-                "onChain": self._chain_to_dict(chain_record),
-                "message": "AI-reviewed policy stored and registered.",
+        self._json({
+            **plan,
+            "report": generate_report(metadata, hash_code),
+            "policyPreview": {
+                "policyId": policy_id,
+                "policyName": policy_name,
+                "policyVersion": policy_version,
+                "developerName": developer_name,
+                "hashCode": hash_code,
             },
-            HTTPStatus.CREATED,
-        )
+        })
+
+    def _complete_policy(self, payload: dict[str, Any]) -> None:
+        record_key = self._required(payload, "recordKey")
+        if len(record_key) != 66 or not record_key.startswith("0x"):
+            raise ValueError("recordKey must be a 32-byte hex value")
+        try:
+            key_bytes = bytes.fromhex(record_key[2:])
+        except ValueError as exc:
+            raise ValueError("recordKey must be a 32-byte hex value") from exc
+        registry._require_connection()
+        if not registry.contract.functions.hasRecord(key_bytes).call():
+            self._json({"error": "Registration is not finalized on Base Mainnet"}, HTTPStatus.CONFLICT)
+            return
+        policy = store.get_by_record_key(record_key)
+        chain_record = registry.read_record_by_key(record_key)
+        self._json({
+            "policy": policy,
+            "metadata": policy["metadata"],
+            "report": policy["report"],
+            "onChain": self._chain_to_dict(chain_record),
+            "message": "Policy finalized on Base Mainnet.",
+        })
 
     def _reviewed_metadata(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -337,6 +312,9 @@ class AppHandler(BaseHTTPRequestHandler):
     def _preview_policy(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         raw_file = self._raw_file(payload, required=True)
         raw_bytes = self._raw_file_bytes(payload, raw_file)
+        document_limit = int(registry.contract.functions.MAX_DOCUMENT_BYTES().call())
+        if len(raw_bytes) > document_limit:
+            raise ValueError(f"Policy file exceeds the {document_limit}-byte Base contract limit")
         application_name = self._application_name(payload)
         developer_name = self._developer_name(payload)
         hash_code = hash_policy_bytes(raw_bytes)
@@ -352,6 +330,12 @@ class AppHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 raise ValueError("policyId must be a UUID") from exc
         else:
+            for policy in store.list_policies(application_name):
+                if (
+                    policy["developerName"].casefold() == developer_name.casefold()
+                    and policy["policyName"].casefold() == application_name.casefold()
+                ):
+                    raise ValueError("This developer already has a policy for the application; use Update Policy")
             requested_policy_id = str(uuid.uuid4())
         metadata.update(
             {
@@ -404,80 +388,45 @@ class AppHandler(BaseHTTPRequestHandler):
         submitted_hash = hash_policy_bytes(submitted_bytes)
         stored = store.get_latest_by_application_name(application_name)
         if not stored:
-            self._json(
-                {
-                    "verified": False,
-                    "reason": "No trusted policy was found for that application name.",
-                    "submittedHash": submitted_hash,
-                },
-                HTTPStatus.NOT_FOUND,
-            )
+            self._json({
+                "verified": False,
+                "reason": "No Base Mainnet policy was found for that application name.",
+                "submittedHash": submitted_hash,
+            }, HTTPStatus.NOT_FOUND)
             return
-        policy_version = stored["policyVersion"]
-        chain_record = registry.read_on_chain_record(
-            stored["developerName"],
-            stored["policyName"],
-            policy_version,
-        )
-        if not chain_record:
-            self._json(
-                {
-                    "verified": False,
-                    "reason": "A SQL record was found, but no matching on-chain record was found.",
-                    "stored": stored,
-                    "onChain": self._chain_to_dict(chain_record),
-                },
-                HTTPStatus.NOT_FOUND,
-            )
-            return
-
-        expected_hash = stored["hashCode"]
-        normalized_submitted = normalize_policy_text(submitted_raw)
-        normalized_stored = normalize_policy_text(stored["rawFile"])
-        stored_metadata_hash = hash_policy_bytes(canonical_metadata_bytes(stored["metadata"]))
+        chain_record = registry.read_record_by_key(stored["recordKey"])
+        content = registry.read_on_chain_content(stored["recordKey"])
         audit = registry.audit_registration(stored["recordKey"])
-        on_chain_content = registry.read_on_chain_content(stored["recordKey"])
         comparisons = {
-            "submittedTextMatchesSql": normalized_submitted == normalized_stored,
-            "submittedHashMatchesSql": submitted_hash == expected_hash,
-            "submittedHashMatchesOnChainContent": (
-                "0x" + submitted_hash == on_chain_content.document_hash
-            ),
-            "sqlDocumentHashMatchesChain": "0x" + expected_hash == chain_record.data.documentHash,
-            "sqlMetadataHashMatchesChain": "0x" + stored_metadata_hash == chain_record.data.metadataHash,
-            "storedMetadataHashMatchesSql": stored.get("metadataHash", "") == stored_metadata_hash,
-            "onChainDocumentHashValid": audit["checks"]["documentHashMatchesStoredContent"],
-            "onChainMetadataHashValid": audit["checks"]["metadataHashMatchesStoredContent"],
-            "onChainDocumentCommitmentValid": audit["checks"]["documentCommitmentMatchesStorage"],
-            "onChainMetadataCommitmentValid": audit["checks"]["metadataCommitmentMatchesStorage"],
-            "finalizationTransactionSucceeded": audit["checks"]["finalizationTransactionSucceeded"],
-            "finalizationTargetsContract": audit["checks"]["finalizationTargetsContract"],
+            "submittedHashMatchesOnChain": "0x" + submitted_hash == chain_record.data.documentHash,
+            "onChainDocumentHashValid": content.document_hash == chain_record.data.documentHash,
+            "onChainMetadataHashValid": content.metadata_hash == chain_record.data.metadataHash,
+            "onChainDocumentCommitmentValid": content.document_commitment == chain_record.data.documentChunkCommitment,
+            "onChainMetadataCommitmentValid": content.metadata_commitment == chain_record.data.metadataChunkCommitment,
             "publisherMatches": stored["developerName"] == chain_record.data.publisherEntity,
             "serviceNameMatches": stored["policyName"] == chain_record.data.serviceName,
             "versionMatches": stored["policyVersion"] == chain_record.data.policyVersion,
-            "txHashMatches": stored["txHash"] == chain_record.txHash,
-            "recordKeyMatches": stored.get("recordKey", "") == chain_record.recordKey,
-            "contractAddressMatches": stored.get("contractAddress", "").lower() == chain_record.contractAddress.lower(),
-            "chainIdMatches": stored.get("chainId") == chain_record.chainId,
+            "receiptMatches": stored["txHash"] == chain_record.txHash,
+            "contractAddressMatches": stored["contractAddress"].lower() == chain_record.contractAddress.lower(),
+            "chainIdMatches": stored["chainId"] == chain_record.chainId == 8453,
+            **audit["checks"],
         }
         verified = all(comparisons.values())
-        self._json(
-            {
-                "verified": verified,
-                "comparisons": comparisons,
-                "submittedHash": submitted_hash,
-                "sqlHash": expected_hash,
-                "exactHashesMatch": submitted_hash == expected_hash,
-                "audit": audit,
-                "normalization": "case, whitespace, and punctuation ignored",
-                "stored": stored,
-                "onChain": self._chain_to_dict(chain_record),
-                "reason": "Policy text matches after normalization." if verified else "At least one normalized text or record identity comparison failed.",
-            }
-        )
+        self._json({
+            "verified": verified,
+            "comparisons": comparisons,
+            "submittedHash": submitted_hash,
+            "exactHashesMatch": "0x" + submitted_hash == chain_record.data.documentHash,
+            "normalizedTextMatches": normalize_policy_text(submitted_raw) == normalize_policy_text(stored["rawFile"]),
+            "audit": audit,
+            "normalization": "case, whitespace, and punctuation ignored for the informational text comparison",
+            "stored": stored,
+            "onChain": self._chain_to_dict(chain_record),
+            "reason": "Exact policy bytes match the verified Base record." if verified else "The submitted file or an on-chain audit check did not match.",
+        })
 
     def _analyze_policy_with_llm(self, payload: dict[str, Any]) -> None:
-        """Analyze a policy without writing to SQLite or the blockchain.
+        """Analyze a policy without writing to the blockchain.
 
         This preview endpoint intentionally stays separate from registration.
         The returned evidence and review flags can be inspected before a later
@@ -539,7 +488,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "requiresReview": True,
                 "persisted": False,
                 "onChain": False,
-                "message": "Policy analyzed locally. No database or blockchain write was performed.",
+                "message": "Policy analyzed locally. No Base Mainnet transaction was sent.",
             }
         )
 
@@ -551,6 +500,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
+        if length < 0 or length > MAX_HTTP_BODY_BYTES:
+            raise ValueError("Request body exceeds the upload limit")
         if length == 0:
             return {}
         body = self.rfile.read(length).decode("utf-8")
@@ -584,6 +535,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _read_multipart(self, content_type: str) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
+        if length < 0 or length > MAX_HTTP_BODY_BYTES:
+            raise ValueError("Request body exceeds the upload limit")
         body = self.rfile.read(length)
         message = BytesParser(policy=policy.default).parsebytes(
             b"Content-Type: " + content_type.encode("utf-8") + b"\r\nMIME-Version: 1.0\r\n\r\n" + body
@@ -663,7 +616,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def _duplicate_hash_response(self, duplicate: dict[str, Any], hash_code: str) -> None:
         self._json(
             {
-                "error": "This file content is already registered. No SQL or on-chain update was performed.",
+                "error": "This file content is already registered on Base Mainnet.",
                 "duplicate": {
                     "policyId": duplicate["policyId"],
                     "applicationName": duplicate["policyName"],
@@ -776,7 +729,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _handle_error(self, exc: Exception) -> None:
         traceback.print_exc()
-        self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        self._json(
+            {"error": "Server failed to process the Base Mainnet request. Check server logs."},
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
 
 
 def main() -> None:

@@ -5,6 +5,8 @@ const updateForm = document.querySelector("#updateForm");
 const sampleButton = document.querySelector("#sampleButton");
 const refreshButton = document.querySelector("#refreshButton");
 const developerSelect = document.querySelector("#developerSelect");
+const connectWalletButton = document.querySelector("#connectWallet");
+const walletStatus = document.querySelector("#walletStatus");
 const managedPolicySelect = document.querySelector("#managedPolicySelect");
 const hashValue = document.querySelector("#hashValue");
 const txValue = document.querySelector("#txValue");
@@ -33,6 +35,8 @@ const reviewFields = document.querySelector("#reviewFields");
 const reviewPolicy = document.querySelector("#reviewPolicy");
 const reviewSourceStatus = document.querySelector("#reviewSourceStatus");
 const reviewStatus = document.querySelector("#reviewStatus");
+const resumeFile = document.querySelector("#resumeFile");
+const resumeFileLabel = document.querySelector("#resumeFileLabel");
 const confirmReview = document.querySelector("#confirmReview");
 const cancelReview = document.querySelector("#cancelReview");
 const viewTabs = document.querySelectorAll("[data-view]");
@@ -43,13 +47,18 @@ let queryPolicies = [];
 let verificationPolicies = [];
 let verificationResult = null;
 let verificationHistoryError = "";
-let chainRecordsByTx = new Map();
+let chainRecordsByKey = new Map();
 let chainLookupError = "";
+let chainAuditIssues = [];
 let workflowBusy = false;
+let walletAddress = "";
+let walletChainId = "";
+let walletConfig = null;
 let currentEvidence = {};
 let currentDetails = {};
 let currentAssessment = {};
 let pendingReview = null;
+const pendingReviewStorageKey = "privacyPolicyMachine.basePendingReview.v1";
 
 const reviewFieldDefinitions = [
   ["dataTypeTags", "Data Types", "list"],
@@ -150,13 +159,30 @@ viewTabs.forEach((tab) => {
 
 refreshButton.addEventListener("click", () => loadRecords());
 managedPolicySelect.addEventListener("change", () => syncSelectedPolicy());
+connectWalletButton.addEventListener("click", async () => {
+  try {
+    setBusy(true);
+    await connectWallet();
+  } catch (error) {
+    walletStatus.textContent = formatError(error);
+  } finally {
+    setBusy(false);
+  }
+});
 developerSelect.addEventListener("change", () => {
   syncDeveloperFields();
+  updateWalletStatus();
   loadRecords(queryForm.applicationName.value.trim());
 });
 
 policyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (pendingReview?.activeRecordKey) {
+    showView("review", { skipLoad: true });
+    reviewStatus.className = "verification fail";
+    reviewStatus.textContent = "Finish the Base upload already in progress before starting another policy.";
+    return;
+  }
   syncDeveloperFields();
   if (!policyForm.applicationName.value.trim()) {
     reportBox.textContent = "Please enter an application name.";
@@ -178,8 +204,36 @@ policyForm.addEventListener("submit", async (event) => {
   });
 });
 
-cancelReview.addEventListener("click", () => clearReview());
+cancelReview.addEventListener("click", () => {
+  if (pendingReview?.activeRecordKey) {
+    reviewStatus.className = "verification";
+    reviewStatus.textContent = "Your Base upload is still in progress. The review and resume details remain available on this device.";
+    showView(pendingReview.workflow === "update" ? "update" : "create", { skipLoad: true });
+    return;
+  }
+  clearReview();
+});
 confirmReview.addEventListener("click", registerReviewedPolicy);
+resumeFile.addEventListener("change", async () => {
+  const file = resumeFile.files[0];
+  if (!file || !pendingReview?.activeRecordKey) return;
+  try {
+    if (file.name !== pendingReview.fileName || file.size !== pendingReview.fileSize
+        || await fileSha256(file) !== pendingReview.fileHash) {
+      throw new Error("This file differs from the one used to begin the Base upload. Select the original file.");
+    }
+    pendingReview.file = file;
+    resumeFileLabel.hidden = true;
+    reviewPolicy.textContent = await file.text();
+    reviewStatus.className = "verification";
+    reviewStatus.textContent = "Original file restored. Confirm and Register on Base to resume the remaining transactions.";
+  } catch (error) {
+    pendingReview.file = null;
+    resumeFile.value = "";
+    reviewStatus.className = "verification fail";
+    reviewStatus.textContent = formatError(error);
+  }
+});
 reviewFields.addEventListener("click", (event) => {
   const button = event.target.closest("[data-evidence-line]");
   if (!button) return;
@@ -219,7 +273,7 @@ queryForm.addEventListener("submit", async (event) => {
     const policyGroups = groupPolicyVersions(queryPolicies);
     queryPolicyPicker.hidden = policyGroups.length < 2;
     queryPolicySelect.innerHTML = policyGroups.map(([policy]) =>
-      `<option value="${escapeHtml(policy.id)}">${escapeHtml(displayPolicyName(policy))} · ${escapeHtml(policy.policyId)}</option>`
+      `<option value="${escapeHtml(policyIdentity(policy))}">${escapeHtml(displayPolicyName(policy))} · ${escapeHtml(policy.policyId)}</option>`
     ).join("");
     queryBox.className = "verification pass";
     if (queryPolicies.length) {
@@ -239,7 +293,7 @@ queryForm.addEventListener("submit", async (event) => {
 });
 
 queryPolicySelect.addEventListener("change", () => {
-  const policy = queryPolicies.find((item) => String(item.id) === queryPolicySelect.value);
+  const policy = queryPolicies.find((item) => policyIdentity(item) === queryPolicySelect.value);
   if (policy) {
     renderQueryFullText(policy);
     verifyForm.applicationName.value = displayPolicyName(policy);
@@ -249,21 +303,21 @@ queryPolicySelect.addEventListener("change", () => {
 queryFullText.addEventListener("click", (event) => {
   if (jumpToSavedEvidence(event, queryFullText)) return;
   const button = event.target.closest("[data-view-version]");
-  const policy = button && queryPolicies.find((item) => String(item.id) === button.dataset.recordId);
+  const policy = button && queryPolicies.find((item) => policyIdentity(item) === button.dataset.recordId);
   if (policy) renderQueryFullText(policy);
 });
 
 recordsDetail.addEventListener("click", (event) => {
   if (jumpToSavedEvidence(event, recordsDetail)) return;
   const button = event.target.closest("[data-view-version]");
-  const policy = button && listedPolicies.find((item) => String(item.id) === button.dataset.recordId);
+  const policy = button && listedPolicies.find((item) => policyIdentity(item) === button.dataset.recordId);
   if (policy) selectRecordPolicy(policy);
 });
 
 verificationPolicyContent.addEventListener("click", (event) => {
   if (jumpToSavedEvidence(event, verificationPolicyContent)) return;
   const button = event.target.closest("[data-view-version]");
-  const policy = button && verificationPolicies.find((item) => String(item.id) === button.dataset.recordId);
+  const policy = button && verificationPolicies.find((item) => policyIdentity(item) === button.dataset.recordId);
   if (policy) renderVerificationPolicyDetail(policy);
 });
 
@@ -307,6 +361,12 @@ verifyForm.addEventListener("submit", async (event) => {
 
 updateForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (pendingReview?.activeRecordKey) {
+    showView("review", { skipLoad: true });
+    reviewStatus.className = "verification fail";
+    reviewStatus.textContent = "Finish the Base upload already in progress before starting another policy.";
+    return;
+  }
   syncDeveloperFields();
   if (!updateForm.policyId.value.trim()) {
     updateBox.className = "verification fail";
@@ -358,6 +418,309 @@ async function postForm(path, payload) {
   return data;
 }
 
+async function postJson(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error || data.reason || "Request failed");
+    error.details = data;
+    throw error;
+  }
+  return data;
+}
+
+async function loadWalletConfig() {
+  if (walletConfig) return walletConfig;
+  const response = await fetch("/api/config");
+  const config = await response.json();
+  if (!response.ok) throw new Error(config.error || "Could not load Base network configuration.");
+  if (Number(config.chainId) !== 8453 || !/^0x[0-9a-fA-F]{40}$/.test(config.contractAddress || "")) {
+    throw new Error("Base Mainnet contract configuration is incomplete or incorrect.");
+  }
+  walletConfig = config;
+  return config;
+}
+
+function walletProvider() {
+  if (!window.ethereum || typeof window.ethereum.request !== "function") {
+    throw new Error("Install or open an EIP-1193 browser wallet to register on Base Mainnet.");
+  }
+  return window.ethereum;
+}
+
+async function refreshWalletState() {
+  if (!window.ethereum) {
+    updateWalletStatus();
+    return;
+  }
+  const provider = walletProvider();
+  const [accounts, chainId] = await Promise.all([
+    provider.request({ method: "eth_accounts" }),
+    provider.request({ method: "eth_chainId" }),
+  ]);
+  walletAddress = accounts && accounts[0] ? accounts[0] : "";
+  walletChainId = String(chainId || "").toLowerCase();
+  updateWalletStatus();
+}
+
+async function connectWallet() {
+  const config = await loadWalletConfig();
+  const accounts = await walletProvider().request({ method: "eth_requestAccounts" });
+  walletAddress = accounts && accounts[0] ? accounts[0] : "";
+  if (!walletAddress) throw new Error("Wallet did not provide an account.");
+  await switchToBaseMainnet(config);
+  await refreshWalletState();
+  if (!walletAddress) throw new Error("Wallet disconnected during connection.");
+  return walletAddress;
+}
+
+async function switchToBaseMainnet(config) {
+  const provider = walletProvider();
+  const baseChainId = "0x2105";
+  let activeChain = String(await provider.request({ method: "eth_chainId" })).toLowerCase();
+  if (activeChain === baseChainId) {
+    walletChainId = activeChain;
+    updateWalletStatus();
+    return;
+  }
+  try {
+    await provider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: baseChainId }],
+    });
+  } catch (error) {
+    if (Number(error.code) !== 4902 && Number(error.data?.originalError?.code) !== 4902) throw error;
+    await provider.request({
+      method: "wallet_addEthereumChain",
+      params: [{
+        chainId: baseChainId,
+        chainName: "Base Mainnet",
+        nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+        rpcUrls: [config.rpcUrl || "https://mainnet.base.org"],
+        blockExplorerUrls: ["https://basescan.org"],
+      }],
+    });
+  }
+  activeChain = String(await provider.request({ method: "eth_chainId" })).toLowerCase();
+  if (activeChain !== baseChainId) throw new Error("Switch your wallet to Base Mainnet (chain ID 8453).");
+  walletChainId = activeChain;
+  updateWalletStatus();
+}
+
+async function ensureDeveloperWallet(developer) {
+  const config = await loadWalletConfig();
+  if (!walletAddress) await connectWallet();
+  else await switchToBaseMainnet(config);
+  await refreshWalletState();
+  const expected = config.publisherWallets && config.publisherWallets[developer];
+  if (!/^0x[0-9a-fA-F]{40}$/.test(expected || "")) {
+    throw new Error(`No Base Mainnet publisher wallet is configured for ${developer}.`);
+  }
+  if (walletAddress.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(`Connected wallet ${shorten(walletAddress)} is not the configured ${developer} publisher wallet (${shorten(expected)}). Switch accounts before registering.`);
+  }
+  if (walletChainId !== "0x2105") throw new Error("Wallet is not connected to Base Mainnet.");
+  return walletAddress;
+}
+
+function updateWalletStatus() {
+  if (!window.ethereum) {
+    walletStatus.textContent = "Browser wallet unavailable";
+    connectWalletButton.textContent = "Connect Wallet";
+    return;
+  }
+  if (!walletAddress) {
+    walletStatus.textContent = "Wallet not connected";
+    connectWalletButton.textContent = "Connect Wallet";
+    return;
+  }
+  const expected = walletConfig?.publisherWallets?.[currentDeveloper()];
+  const accountLabel = expected && expected.toLowerCase() !== walletAddress.toLowerCase()
+    ? " · wrong developer wallet" : "";
+  const networkLabel = walletChainId === "0x2105" ? "Base Mainnet" : "wrong network";
+  walletStatus.textContent = `${shorten(walletAddress)} · ${networkLabel}${accountLabel}`;
+  connectWalletButton.textContent = "Switch Wallet";
+}
+
+async function transactionDataHash(data) {
+  const encoded = new TextEncoder().encode(String(data || "").toLowerCase());
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sameTransaction(left, right) {
+  return String(left?.to || "").toLowerCase() === String(right?.to || "").toLowerCase()
+    && await transactionDataHash(left?.data) === right?.dataHash;
+}
+
+async function waitForReceipt(hash) {
+  const provider = walletProvider();
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const receipt = await provider.request({ method: "eth_getTransactionReceipt", params: [hash] });
+    if (receipt) {
+      if (Number(receipt.status) !== 1) {
+        throw new Error(`Base transaction ${shorten(hash)} failed. Review it in your wallet before retrying.`);
+      }
+      return receipt;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  throw new Error(`Transaction ${shorten(hash)} has not confirmed yet. Return to this review and retry after it confirms; the upload will resume.`);
+}
+
+async function fileSha256(file) {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function rememberPendingReview(review) {
+  if (!review.fileHash) review.fileHash = await fileSha256(review.file);
+  review.fileName = review.file.name;
+  review.fileSize = review.file.size;
+  const draft = {
+    workflow: review.workflow,
+    policyId: review.policyId,
+    changeSummary: review.changeSummary,
+    metadata: review.metadata,
+    applicationName: review.applicationName,
+    developer: review.developer,
+    policyUrl: review.policyUrl,
+    effectiveDate: review.effectiveDate,
+    activeRecordKey: review.activeRecordKey,
+    activeContractAddress: review.activeContractAddress,
+    activeChainId: review.activeChainId,
+    activeWalletAddress: review.activeWalletAddress,
+    pendingTransaction: review.pendingTransaction || null,
+    fileName: review.fileName,
+    fileSize: review.fileSize,
+    fileHash: review.fileHash,
+  };
+  try {
+    localStorage.setItem(pendingReviewStorageKey, JSON.stringify(draft));
+  } catch {
+    throw new Error("Could not save upload progress in this browser. Free browser storage before sending Base transactions.");
+  }
+}
+
+function restorePendingReview() {
+  let draft;
+  try {
+    draft = JSON.parse(localStorage.getItem(pendingReviewStorageKey) || "null");
+  } catch {
+    return;
+  }
+  if (!draft?.activeRecordKey || !draft?.metadata || !draft?.fileHash) return;
+  developerSelect.value = draft.developer;
+  syncDeveloperFields();
+  openReview({ metadata: draft.metadata }, { ...draft, file: null });
+  reviewStatus.className = "verification";
+  reviewStatus.textContent = `Base upload ${shorten(draft.activeRecordKey)} can resume. Reattach ${draft.fileName} (${draft.fileSize} bytes), then confirm the remaining transactions.`;
+  updateWalletStatus();
+}
+
+function forgetPendingReview() {
+  try {
+    localStorage.removeItem(pendingReviewStorageKey);
+  } catch {
+    // An unavailable browser store cannot affect a completed on-chain registration.
+  }
+}
+
+async function submitPreparedTransactions(preparation, review) {
+  if (Number(preparation.chainId) !== 8453) throw new Error("The server prepared transactions for the wrong chain.");
+  if (String(preparation.contractAddress || "").toLowerCase() !== String(walletConfig.contractAddress).toLowerCase()) {
+    throw new Error("The prepared contract does not match the configured Base contract.");
+  }
+  if (review.activeContractAddress
+      && review.activeContractAddress.toLowerCase() !== preparation.contractAddress.toLowerCase()) {
+    throw new Error("The configured Base contract changed during this upload. Restore the original deployment before resuming.");
+  }
+  if (review.activeChainId && Number(review.activeChainId) !== Number(preparation.chainId)) {
+    throw new Error("The configured chain changed during this upload.");
+  }
+  if (review.activeWalletAddress && review.activeWalletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+    throw new Error("Connect the same developer wallet that started this Base upload before resuming.");
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(preparation.recordKey || "")) {
+    throw new Error("The server did not return a valid record key.");
+  }
+  if (review.activeRecordKey && review.activeRecordKey.toLowerCase() !== preparation.recordKey.toLowerCase()) {
+    throw new Error("The prepared record changed during this upload. Review the policy before retrying.");
+  }
+  review.activeRecordKey = preparation.recordKey;
+  review.activeContractAddress = preparation.contractAddress;
+  review.activeChainId = preparation.chainId;
+  review.activeWalletAddress = walletAddress;
+  const transactions = preparation.transactions;
+  if (!Array.isArray(transactions)) throw new Error("The server did not return a transaction plan.");
+  await rememberPendingReview(review);
+  lockReviewFields();
+  if (review.pendingTransaction) {
+    const pending = review.pendingTransaction;
+    let pendingStillNeeded = false;
+    for (const transaction of transactions) {
+      if (await sameTransaction(transaction, pending)) {
+        pendingStillNeeded = true;
+        break;
+      }
+    }
+    if (pendingStillNeeded) {
+      reviewStatus.textContent = `Checking earlier ${pending.phase || "upload"} transaction ${shorten(pending.hash)} on Base Mainnet...`;
+      try {
+        await waitForReceipt(pending.hash);
+      } catch (error) {
+        if (!String(error.message).includes("has not confirmed yet")) {
+          review.pendingTransaction = null;
+          await rememberPendingReview(review);
+        }
+        throw error;
+      }
+      review.pendingTransaction = null;
+      await rememberPendingReview(review);
+      // The earlier transaction may have changed the remaining plan.
+      return false;
+    }
+    // This exact call is no longer in the chain-derived plan, including after a wallet speed-up.
+    review.pendingTransaction = null;
+    await rememberPendingReview(review);
+  }
+  for (let index = 0; index < transactions.length; index += 1) {
+    const transaction = transactions[index];
+    if (String(transaction.to || "").toLowerCase() !== walletConfig.contractAddress.toLowerCase()
+        || !/^0x[0-9a-fA-F]+$/.test(transaction.data || "")) {
+      throw new Error("The server returned an invalid Base contract transaction.");
+    }
+    await ensureDeveloperWallet(review.developer);
+    reviewStatus.textContent = `Base Mainnet transaction ${index + 1} of ${transactions.length}: ${transaction.phase || "upload"}. Confirm it in your wallet; your wallet pays the gas fee.`;
+    const params = { from: walletAddress, to: transaction.to, data: transaction.data };
+    if (transaction.value != null) params.value = transaction.value;
+    const hash = await walletProvider().request({ method: "eth_sendTransaction", params: [params] });
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hash || "")) throw new Error("Wallet did not return a valid transaction hash.");
+    review.pendingTransaction = {
+      phase: transaction.phase,
+      to: transaction.to,
+      dataHash: await transactionDataHash(transaction.data),
+      hash,
+    };
+    await rememberPendingReview(review);
+    reviewStatus.textContent = `Waiting for ${transaction.phase || "upload"} transaction ${shorten(hash)} to confirm on Base Mainnet...`;
+    try {
+      await waitForReceipt(hash);
+    } catch (error) {
+      if (!String(error.message).includes("has not confirmed yet")) review.pendingTransaction = null;
+      throw error;
+    }
+    review.pendingTransaction = null;
+    await rememberPendingReview(review);
+  }
+  return true;
+}
+
 async function analyzeForReview(payload, context) {
   setBusy(true);
   context.statusBox.className = context.workflow === "update" ? "verification" : context.statusBox.className;
@@ -387,11 +750,19 @@ function openReview(result, context) {
     developer: context.developer,
     policyUrl: context.policyUrl,
     effectiveDate: context.effectiveDate,
+    activeRecordKey: context.activeRecordKey || "",
+    activeContractAddress: context.activeContractAddress || "",
+    activeChainId: context.activeChainId || "",
+    activeWalletAddress: context.activeWalletAddress || "",
+    pendingTransaction: context.pendingTransaction || null,
+    fileName: context.fileName || context.file?.name || "",
+    fileSize: context.fileSize ?? context.file?.size ?? 0,
+    fileHash: context.fileHash || "",
   };
   reviewMethod.textContent = context.workflow === "update"
     ? "AI update · human approval required"
     : "AI upload · human approval required";
-  reviewGuidance.textContent = "The AI model produced the draft below. Check every value and correct it before registration.";
+  reviewGuidance.textContent = "The AI model produced the draft below. Check every value and correct it. Registration writes the full policy and metadata to Base Mainnet, with transaction fees paid by your developer wallet.";
   reviewPolicy.textContent = pendingReview.file ? "Loading policy text..." : "Policy text unavailable.";
   reviewSourceStatus.textContent = "Select an evidence quote to locate it.";
   if (pendingReview.file) {
@@ -424,13 +795,31 @@ function openReview(result, context) {
     return renderReviewListField(key, label, value, pendingReview.metadata.metadataEvidence[key], details);
   }).join("");
   reviewStatus.className = "verification";
-  reviewStatus.textContent = "Review every field before registration.";
+  reviewStatus.textContent = "Review every field before registration. Your developer wallet pays Base Mainnet gas fees.";
+  cancelReview.textContent = pendingReview.activeRecordKey ? "Back" : "Cancel";
+  resumeFileLabel.hidden = Boolean(pendingReview.file) || !pendingReview.activeRecordKey;
+  resumeFile.value = "";
+  lockReviewFields();
   reviewTab.hidden = false;
   showView("review", { skipLoad: true });
 }
 
+function lockReviewFields() {
+  const locked = Boolean(pendingReview?.activeRecordKey);
+  cancelReview.textContent = locked ? "Back" : "Cancel";
+  reviewFields.querySelectorAll("input, textarea, select").forEach((control) => {
+    control.disabled = locked;
+  });
+}
+
 async function registerReviewedPolicy() {
   if (!pendingReview) {
+    return;
+  }
+  if (!pendingReview.file) {
+    reviewStatus.className = "verification fail";
+    reviewStatus.textContent = `Reattach the original ${pendingReview.fileName || "policy"} file before resuming this Base upload.`;
+    resumeFileLabel.hidden = false;
     return;
   }
   reviewFields.querySelectorAll("[data-review-field]").forEach((control) => {
@@ -468,21 +857,33 @@ async function registerReviewedPolicy() {
   payload.append("effectiveDate", pendingReview.effectiveDate);
   payload.append("metadataJson", JSON.stringify(pendingReview.metadata));
   payload.append("rawFile", pendingReview.file, pendingReview.file.name);
+  payload.append("workflow", pendingReview.workflow);
   if (pendingReview.workflow === "update") {
     payload.append("policyId", pendingReview.policyId);
     payload.append("changeSummary", pendingReview.changeSummary);
   }
   const workflow = pendingReview.workflow;
   const reviewedFile = pendingReview.file;
-  const path = workflow === "update" ? "/api/policies/update" : "/api/policies/reviewed";
   setBusy(true);
   try {
-    const result = await postForm(path, payload);
+    const wallet = await ensureDeveloperWallet(pendingReview.developer);
+    payload.append("walletAddress", wallet);
+    let prepared = false;
+    // A retry may first need to wait for a wallet transaction already submitted.
+    while (!prepared) {
+      reviewStatus.className = "verification";
+      reviewStatus.textContent = "Preparing the remaining Base Mainnet transactions...";
+      const plan = await postForm("/api/policies/prepare", payload);
+      prepared = await submitPreparedTransactions(plan, pendingReview);
+    }
+    reviewStatus.textContent = "Checking the completed registration on Base Mainnet...";
+    const result = await postJson("/api/policies/complete", { recordKey: pendingReview.activeRecordKey });
+    forgetPendingReview();
     await completeRegistration(result, reviewedFile);
     if (workflow === "update") {
       updateBox.className = "verification pass";
       updateBox.textContent = [
-        result.message,
+        result.message || "Policy updated on Base Mainnet.",
         `Policy ID: ${result.policy.policyId}`,
         `Application Name: ${result.policy.policyName}`,
         `Uploaded: ${result.policy.policyVersion}`,
@@ -492,7 +893,7 @@ async function registerReviewedPolicy() {
     clearReview(workflow);
   } catch (error) {
     reviewStatus.className = "verification fail";
-    reviewStatus.textContent = formatError(error);
+    reviewStatus.textContent = `${formatError(error)}\nYour reviewed policy is still available here. Use Confirm and Register on Base to resume after resolving the issue.`;
   } finally {
     setBusy(false);
   }
@@ -593,8 +994,11 @@ function reviewEvidenceLines(evidence) {
 function clearReview(destination) {
   const workflow = destination || (pendingReview && pendingReview.workflow) || "create";
   pendingReview = null;
+  forgetPendingReview();
+  cancelReview.textContent = "Cancel";
   reviewFields.innerHTML = "";
   reviewPolicy.textContent = "";
+  resumeFileLabel.hidden = true;
   reviewTab.hidden = true;
   showView(workflow === "update" ? "update" : "create", { skipLoad: true });
 }
@@ -607,9 +1011,13 @@ async function completeRegistration(result, reviewedFile) {
     verifyForm.rawFile.files = transfer.files;
   }
   verifyForm.applicationName.value = result.policy.policyName;
-  await loadRecords();
-  managedPolicySelect.value = result.policy.policyId;
-  syncSelectedPolicy();
+  try {
+    await loadRecords();
+    managedPolicySelect.value = result.policy.policyId;
+    syncSelectedPolicy();
+  } catch (error) {
+    reportBox.textContent += `\nRegistration succeeded, but the policy list could not refresh: ${formatError(error)}`;
+  }
 }
 
 recordList.addEventListener("click", (event) => {
@@ -617,7 +1025,7 @@ recordList.addEventListener("click", (event) => {
   if (!button) {
     return;
   }
-  const policy = listedPolicies.find((item) => String(item.id) === button.dataset.recordId);
+  const policy = listedPolicies.find((item) => policyIdentity(item) === button.dataset.recordId);
   if (policy) {
     selectRecordPolicy(policy);
   }
@@ -701,7 +1109,7 @@ async function loadRecords(applicationName = "") {
           class="record-action"
           type="button"
           data-use-record
-          data-record-id="${escapeHtml(policy.id)}"
+          data-record-id="${escapeHtml(policyIdentity(policy))}"
         >View Details</button>
       </article>`;
     })
@@ -717,21 +1125,25 @@ async function loadChainRecords() {
   try {
     const response = await fetch("/api/chain");
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Could not query the current chain");
-    chainRecordsByTx = new Map((payload.records || []).map((record) => [record.txHash.toLowerCase(), record]));
+    if (!response.ok) throw new Error(payload.error || "Could not query Base Mainnet");
+    chainRecordsByKey = new Map((payload.records || [])
+      .filter((record) => record.recordKey)
+      .map((record) => [record.recordKey.toLowerCase(), record]));
+    chainAuditIssues = Array.isArray(payload.auditIssues) ? payload.auditIssues : [];
     chainLookupError = "";
   } catch (error) {
-    chainRecordsByTx = new Map();
-    chainLookupError = error.message || "Could not query the current chain";
+    chainRecordsByKey = new Map();
+    chainAuditIssues = [];
+    chainLookupError = error.message || "Could not query Base Mainnet";
   }
   updateSystemStatus();
 }
 
 function groupPolicyVersions(policies) {
-  // The API returns newest uploads first (createdAt, then id descending).
+  // The API returns newest Base registrations first.
   const groups = new Map();
   policies.forEach((policy) => {
-    const key = policy.policyId || `record:${policy.id}`;
+    const key = policy.policyId || `record:${policyIdentity(policy)}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(policy);
   });
@@ -741,7 +1153,11 @@ function groupPolicyVersions(policies) {
 function policyVersions(policy, policies) {
   return policies.filter((item) => policy.policyId
     ? item.policyId === policy.policyId
-    : item.id === policy.id);
+    : policyIdentity(item) === policyIdentity(policy));
+}
+
+function policyIdentity(policy) {
+  return String(policy.recordKey || policy.id || "");
 }
 
 function renderManagedPolicies() {
@@ -820,25 +1236,26 @@ function formatError(error) {
 }
 
 function renderProcessingResult(result) {
-  const report = result.report;
+  const report = result.report || {};
   const onChainData = result.onChain && result.onChain.data;
-  hashValue.textContent = shorten(report.hashCode);
-  txValue.textContent = shorten(result.onChain.txHash);
-  storageValue.textContent = `Saved row #${result.policy.id}`;
-  blockValue.textContent = `Block ${result.onChain.blockNumber}`;
+  hashValue.textContent = shorten(report.hashCode || result.policy.hashCode);
+  txValue.textContent = shorten(result.onChain?.txHash || result.policy.txHash) || "Registered";
+  storageValue.textContent = shorten(result.policy.recordKey || result.onChain?.recordKey);
+  blockValue.textContent = result.onChain?.blockNumber != null
+    ? `Block ${result.onChain.blockNumber}` : "Registered";
   reportBox.textContent = [
     `Policy ID: ${result.policy.policyId}`,
     `Application Name: ${result.policy.policyName}`,
     `Developer: ${result.policy.developerName}`,
     `Upload method: ${uploadMethodLabel(result.policy.uploadMethod)}`,
     `Uploaded: ${result.policy.policyVersion}`,
-    `On-chain chunks: ${onChainData ? onChainData.documentChunkCount + onChainData.metadataChunkCount : 0}`,
-    `Chain transactions: ${(result.onChain.transactions || []).length}`,
-    report.summary,
+    `On-chain chunks: ${onChainData ? Number(onChainData.documentChunkCount || 0) + Number(onChainData.metadataChunkCount || 0) : 0}`,
+    result.onChain?.txHash ? `Finalization transaction: ${result.onChain.txHash}` : "",
+    report.summary || "Policy registered on Base Mainnet.",
     "",
     "On-chain metadata:",
     onChainData ? formatOnChainMetadata(onChainData) : "No on-chain metadata returned.",
-  ].join("\n");
+  ].filter((line) => line !== "").join("\n");
 }
 
 async function renderVerification(result) {
@@ -853,12 +1270,15 @@ async function renderVerification(result) {
     const [response] = await Promise.all([fetch(path), loadChainRecords()]);
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not load policy versions");
-    verificationPolicies = [
-      result.stored,
-      ...(payload.policies || []).filter((policy) =>
-        policy.policyId === result.stored.policyId && Number(policy.id) < Number(result.stored.id)
-      ),
-    ];
+    const matching = (payload.policies || []).filter((policy) =>
+      policy.policyId === result.stored.policyId
+    );
+    const selectedIndex = matching.findIndex((policy) =>
+      policyIdentity(policy) === policyIdentity(result.stored)
+    );
+    verificationPolicies = selectedIndex >= 0
+      ? matching
+      : [result.stored, ...matching.filter((policy) => policyIdentity(policy) !== policyIdentity(result.stored))];
   } catch (error) {
     verificationPolicies = [];
     verificationHistoryError = "Previous versions could not be loaded.";
@@ -868,7 +1288,7 @@ async function renderVerification(result) {
 }
 
 function verificationVersionLabel(policy) {
-  const index = verificationPolicies.findIndex((version) => String(version.id) === String(policy.id));
+  const index = verificationPolicies.findIndex((version) => policyIdentity(version) === policyIdentity(policy));
   return index < 0
     ? ""
     : `Version ${verificationPolicies.length - index} of ${verificationPolicies.length}`;
@@ -879,7 +1299,7 @@ function renderVerificationSummary(result) {
   const comparisons = Object.entries(result.comparisons || {})
     .map(([name, value]) => `${name}: ${value ? "pass" : "fail"}`)
     .join("\n");
-  const storedHash = result.sqlHash || (result.stored && result.stored.hashCode);
+  const storedHash = result.stored && result.stored.hashCode;
   const storedVersion = result.stored && [
     verificationVersionLabel(result.stored),
     result.stored.policyVersion,
@@ -889,22 +1309,22 @@ function renderVerificationSummary(result) {
     result.reason,
     result.stored ? `Application Name: ${displayPolicyName(result.stored)}` : "",
     result.stored ? `Policy ID: ${result.stored.policyId}` : "",
-    result.stored ? `${result.verified ? "Verified against saved version" : "Compared with saved version"}: ${storedVersion}` : "Saved version: none",
+    result.stored ? `${result.verified ? "Verified against Base version" : "Compared with Base version"}: ${storedVersion}` : "Base version: none",
     comparisons,
     result.normalization ? `Text comparison: ${result.normalization}` : "",
-    typeof result.exactHashesMatch === "boolean" ? `Exact file hash matches stored record: ${result.exactHashesMatch ? "yes" : "no"}` : "",
-    storedHash ? `Stored hash: ${shorten(storedHash)}` : "",
+    typeof result.exactHashesMatch === "boolean" ? `Exact file hash matches Base record: ${result.exactHashesMatch ? "yes" : "no"}` : "",
+    storedHash ? `On-chain hash: ${shorten(storedHash)}` : "",
   ].filter(Boolean).join("\n");
 }
 
 function renderVerificationPolicyDetail(policy) {
-  const isComparedVersion = String(policy.id) === String(verificationResult.stored.id);
+  const isComparedVersion = policyIdentity(policy) === policyIdentity(verificationResult.stored);
   const onChain = isComparedVersion ? verificationResult.onChain : findOnChainRecord(policy);
   const data = mergeMetadata(onChain && onChain.data, metadataFallback(policy));
   const note = isComparedVersion
     ? verificationResult.verified
-      ? "The submitted policy matches this saved version and its on-chain record."
-      : "This is the saved version used for comparison. The verification request did not pass."
+      ? "The submitted policy matches this Base version and its on-chain record."
+      : "This is the Base version used for comparison. The verification request did not pass."
     : `Viewing ${verificationVersionLabel(policy)} (${policy.policyVersion}) for reference. The verification result above applies only to ${verificationVersionLabel(verificationResult.stored)} (${verificationResult.stored.policyVersion}).`;
   verificationDetailNote.textContent = [note, verificationHistoryError].filter(Boolean).join(" ");
   verificationPolicyContent.innerHTML = renderPolicyDetailHtml(policy, onChain, data, verificationPolicies);
@@ -921,8 +1341,11 @@ function setBusy(isBusy) {
 
 function updateSystemStatus() {
   systemStatus.textContent = workflowBusy
-    ? "Processing workflow"
-    : chainLookupError ? "Chain unavailable" : "Current chain connected";
+    ? "Processing Base workflow"
+    : chainLookupError ? "Base Mainnet unavailable"
+      : chainAuditIssues.length
+        ? `Base connected · ${chainAuditIssues.length} invalid record(s) excluded`
+        : "Base Mainnet connected";
 }
 
 function shorten(value) {
@@ -937,9 +1360,9 @@ function uploadMethodLabel(method) {
 }
 
 function findOnChainRecord(policy) {
-  const record = chainRecordsByTx.get((policy.txHash || "").toLowerCase());
+  const record = chainRecordsByKey.get((policy.recordKey || "").toLowerCase());
   if (!record) return null;
-  const matchingReceipt = ["contractAddress", "recordKey", "blockHash"].every((key) =>
+  const matchingReceipt = ["contractAddress", "recordKey"].every((key) =>
     !policy[key] || String(policy[key]).toLowerCase() === String(record[key] || "").toLowerCase()
   );
   const matchingChain = policy.chainId == null || String(policy.chainId) === String(record.chainId);
@@ -947,8 +1370,8 @@ function findOnChainRecord(policy) {
 }
 
 function chainRecordStatus(onChain) {
-  if (onChain) return "Found on current chain";
-  return chainLookupError ? "Chain query unavailable" : "Not found on current chain";
+  if (onChain) return "Found on Base Mainnet";
+  return chainLookupError ? "Base query unavailable" : "Not found on Base Mainnet";
 }
 
 function displayMetadataForPolicy(policy) {
@@ -1023,6 +1446,10 @@ function metadataFallback(policy) {
 function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
   const rawFile = policy.rawFile || "";
   const rawPreview = rawFile.length > 900 ? `${rawFile.slice(0, 900)}...` : rawFile;
+  const recordKey = policy.recordKey || onChain?.recordKey || "";
+  const rawDownload = /^0x[0-9a-fA-F]{64}$/.test(recordKey)
+    ? `<a class="compliance-download" href="/api/records/${encodeURIComponent(recordKey)}/raw" download>Download exact original bytes</a>`
+    : "";
   currentEvidence = data.metadataEvidence || {};
   currentDetails = data.metadataDetails || {};
   currentAssessment = data.metadataAssessment || {};
@@ -1040,7 +1467,7 @@ function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
       ${renderRegistrationReceiptHtml(policy, onChain)}
 
       <div class="metadata-grid-detail">
-        ${metadataGroups(data, onChain ? "On-chain Audit" : "Saved Audit Data").map(([title, rows]) => renderMetadataGroupHtml(title, rows)).join("")}
+        ${metadataGroups(data, "On-chain Audit").map(([title, rows]) => renderMetadataGroupHtml(title, rows)).join("")}
       </div>
 
       ${renderCompliancePanelHtml(onChain)}
@@ -1050,6 +1477,7 @@ function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
           <h3>Raw Policy Preview</h3>
           <span>${escapeHtml(String(rawFile.length))} characters</span>
         </div>
+        ${rawDownload}
         <p class="source-navigation-status" role="status" aria-live="polite">Select an evidence quote above to find it in the full policy.</p>
         <pre>${escapeHtml(rawPreview || "No raw policy text available.")}</pre>
         <details>
@@ -1063,18 +1491,18 @@ function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
 
 function renderVersionNavigationHtml(policy, versions) {
   const latest = versions[0] || policy;
-  const isLatest = latest.id === policy.id;
-  const index = versions.findIndex((version) => version.id === policy.id);
+  const isLatest = policyIdentity(latest) === policyIdentity(policy);
+  const index = versions.findIndex((version) => policyIdentity(version) === policyIdentity(policy));
   const previous = versions.slice(1);
   return `<div class="policy-versions">
     <div class="version-heading">
       <span class="version-label">${isLatest ? "Latest version" : "Previous version"} · Version ${versions.length - index} of ${versions.length}</span>
-      ${isLatest ? "" : `<button type="button" class="version-action" data-view-version data-record-id="${escapeHtml(latest.id)}">Latest version</button>`}
+      ${isLatest ? "" : `<button type="button" class="version-action" data-view-version data-record-id="${escapeHtml(policyIdentity(latest))}">Latest version</button>`}
     </div>
     ${previous.length ? `<details class="policy-history" ${isLatest ? "" : "open"}>
       <summary>Previous versions (${previous.length})</summary>
       <div class="version-list">
-        ${previous.map((version, previousIndex) => `<button type="button" class="version-action" data-view-version data-record-id="${escapeHtml(version.id)}" ${version.id === policy.id ? 'aria-current="true"' : ""}>
+        ${previous.map((version, previousIndex) => `<button type="button" class="version-action" data-view-version data-record-id="${escapeHtml(policyIdentity(version))}" ${policyIdentity(version) === policyIdentity(policy) ? 'aria-current="true"' : ""}>
           Version ${versions.length - previousIndex - 1} · ${escapeHtml(version.policyVersion || version.createdAt || "Upload time unavailable")}
         </button>`).join("")}
       </div>
@@ -1096,18 +1524,18 @@ function renderRegistrationReceiptHtml(policy, onChain) {
     ["Block Hash", receipt("blockHash")],
   ];
   return `<section class="registration-receipt">
-    <h3>Saved Registration Receipt</h3>
+    <h3>Base Mainnet Registration Receipt</h3>
     <p class="chain-record-status">${escapeHtml(chainRecordStatus(onChain))}</p>
     ${onChain ? "" : `<p>${chainLookupError
-      ? "The current chain could not be queried. The saved receipt and policy remain available; their current on-chain status could not be checked."
-      : "This saved registration is not present on the current chain. A local chain reset or a different deployment may cause this; the original receipt remains available below."}</p>`}
+      ? "Base Mainnet could not be queried. Refresh to check this record's current status."
+      : "This registration was not found in the configured Base Mainnet contract."}</p>`}
     <dl class="receipt-fields">${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value == null || value === "" ? "Not recorded" : value)}</dd></div>`).join("")}</dl>
   </section>`;
 }
 
 function renderCompliancePanelHtml(onChain) {
   if (!onChain) {
-    return `<section class="compliance-panel"><div class="compliance-heading"><div><h3>On-chain Compliance Result</h3><p>${chainLookupError ? "The current chain is unavailable." : "This version was not found on the current chain."} Its on-chain compliance result cannot be loaded.</p></div><span class="compliance-status unavailable">Unavailable</span></div></section>`;
+    return `<section class="compliance-panel"><div class="compliance-heading"><div><h3>On-chain Compliance Result</h3><p>${chainLookupError ? "Base Mainnet is unavailable." : "This version was not found on Base Mainnet."} Its on-chain compliance result cannot be loaded.</p></div><span class="compliance-status unavailable">Unavailable</span></div></section>`;
   }
   const compliance = onChain && onChain.compliance
     ? onChain.compliance
@@ -1130,7 +1558,7 @@ function renderCompliancePanelHtml(onChain) {
       ${status === "finalized"
         ? "Downloading and verifying the on-chain bundle..."
         : status === "uploading"
-          ? "The local result is complete and its chunks are being uploaded."
+          ? "The compliance result is being uploaded to Base Mainnet."
           : "The result will appear after P1, P2, and P3 finish."}
     </div>
   </section>`;
@@ -1415,4 +1843,22 @@ function escapeHtml(value) {
 }
 
 syncDeveloperFields();
-loadRecords();
+void refreshWalletState().catch((error) => {
+  walletStatus.textContent = formatError(error);
+});
+if (window.ethereum?.on) {
+  window.ethereum.on("accountsChanged", (accounts) => {
+    walletAddress = accounts?.[0] || "";
+    updateWalletStatus();
+  });
+  window.ethereum.on("chainChanged", (chainId) => {
+    walletChainId = String(chainId || "").toLowerCase();
+    updateWalletStatus();
+  });
+}
+restorePendingReview();
+void loadRecords().catch((error) => {
+  chainLookupError = formatError(error);
+  updateSystemStatus();
+  recordList.textContent = chainLookupError;
+});

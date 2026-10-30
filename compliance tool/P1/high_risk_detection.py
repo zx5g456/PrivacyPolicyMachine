@@ -12,17 +12,26 @@ from src.analyzers.high_risk_analyser import analyze_risk
 
 
 CLASSIFICATION_RE = re.compile(
-    r"^\s*High-Risk Classification:\s*\[?(Not High-Risk|High-Risk)\]?\s*$",
-    re.IGNORECASE | re.MULTILINE,
+    r"High-Risk Classification:[ \t]*\[?[ \t]*(Not High-Risk|High-Risk)[ \t]*\]?[ \t]*[.]?",
+    re.IGNORECASE,
 )
+MARKDOWN_PREFIX_RE = re.compile(r"^(?:[-*•]|\d+[.)]|#{1,6})[ \t]+")
 
 
 def extract_risk_classification(analysis: str) -> str:
     """Extract and normalize the classification required by the P1 prompt."""
-    match = CLASSIFICATION_RE.search(analysis)
-    if not match:
+    classifications = set()
+    for line in analysis.splitlines():
+        candidate = MARKDOWN_PREFIX_RE.sub("", line.strip(), count=1)
+        candidate = candidate.replace("*", "").replace("_", "").replace("`", "")
+        match = CLASSIFICATION_RE.fullmatch(candidate.strip())
+        if match:
+            classifications.add(
+                "Not High-Risk" if match.group(1).lower().startswith("not") else "High-Risk"
+            )
+    if len(classifications) != 1:
         raise ValueError("P1 response is missing a valid High-Risk Classification")
-    return "Not High-Risk" if match.group(1).lower().startswith("not") else "High-Risk"
+    return classifications.pop()
 
 
 def detect_high_risk(

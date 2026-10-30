@@ -1,29 +1,34 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   Contract,
+  FetchRequest,
   JsonRpcProvider,
+  Wallet,
+  getAddress,
   getBytes,
+  keccak256,
   sha256,
   solidityPackedKeccak256,
 } from "ethers";
+import {
+  BASE_CHAIN_ID, assertBaseChainId, loadBaseEnv, required,
+} from "../config/load-base-env.js";
+import { loadState } from "./listener-state.js";
 
-const { RPC_URL, CONTRACT_ADDRESS } = process.env;
-
-if (!RPC_URL || !CONTRACT_ADDRESS) {
-  console.error(
-    "Missing configuration. Set RPC_URL and CONTRACT_ADDRESS before starting the listener.",
-  );
-  process.exit(1);
-}
+await loadBaseEnv({ omit: ["BASE_DEPLOYER_PRIVATE_KEY"] });
+assertBaseChainId();
+const RPC_URL = required("RPC_URL");
+const CONTRACT_ADDRESS = getAddress(required("CONTRACT_ADDRESS"));
 
 const registryAbi = [
   "event TrustedPolicyRecordRegistered(bytes32 indexed recordKey, bytes32 indexed documentHash, bytes32 indexed metadataHash, bytes32 previousRecordKey, address registrant, uint64 registeredAt)",
   "function readRecordByKey(bytes32 recordKey) view returns (tuple(bytes32 documentHash, bytes32 metadataHash, bytes32 documentChunkCommitment, bytes32 metadataChunkCommitment, uint64 documentSize, uint64 metadataSize, uint32 documentChunkCount, uint32 metadataChunkCount, string publisherEntity, string serviceName, string policyVersion, string effectiveDate, address registrant, uint64 registeredAt, bytes32 previousRecordKey, bool hasPreviousReference) record)",
   "function readDocumentChunk(bytes32 recordKey, uint32 chunkIndex) view returns (bytes)",
+  "function readMetadataChunk(bytes32 recordKey, uint32 chunkIndex) view returns (bytes)",
   "event ComplianceResultRegistered(bytes32 indexed recordKey, bytes32 indexed bundleHash, address indexed submitter, uint64 registeredAt)",
   "function complianceUploaders(address uploader) view returns (bool)",
   "function hasComplianceResult(bytes32 recordKey) view returns (bool)",
@@ -37,23 +42,26 @@ const registryAbi = [
   "function MAX_CHUNK_BYTES() view returns (uint256)",
 ];
 
-const provider = new JsonRpcProvider(RPC_URL);
+const request = new FetchRequest(RPC_URL);
+request.timeout = 30_000;
+const provider = new JsonRpcProvider(request, undefined, { batchMaxCount: 1 });
 const registry = new Contract(CONTRACT_ADDRESS, registryAbi, provider);
-const configuredUploader = (process.env.COMPLIANCE_UPLOADER_ACCOUNT ?? "").trim();
-const signerReference = configuredUploader
-  ? /^\d+$/.test(configuredUploader)
-    ? Number.parseInt(configuredUploader, 10)
-    : configuredUploader
-  : 0;
-const complianceSigner = await provider.getSigner(signerReference);
-const complianceUploaderAddress = await complianceSigner.getAddress();
+let complianceSigner;
+try {
+  complianceSigner = new Wallet(required("COMPLIANCE_PRIVATE_KEY"), provider);
+} catch {
+  throw new Error("COMPLIANCE_PRIVATE_KEY must be a valid private key in config/base-mainnet.env");
+}
+const complianceUploaderAddress = complianceSigner.address;
 const complianceRegistry = registry.connect(complianceSigner);
 const pollIntervalMs = positiveInteger("POLL_INTERVAL_MS", 5_000);
 const blockBatchSize = positiveInteger("BLOCK_BATCH_SIZE", 2_000);
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const complianceRoot = join(projectRoot, "compliance tool");
-const complianceOutputRoot = resolve(
-  process.env.COMPLIANCE_OUTPUT_DIR ?? join(projectRoot, "data", "compliance-results"),
+const complianceOutputRoot = join(
+  resolve(process.env.COMPLIANCE_OUTPUT_DIR ?? join(projectRoot, "data", "compliance-results")),
+  String(BASE_CHAIN_ID),
+  CONTRACT_ADDRESS.toLowerCase(),
 );
 const pythonExecutable =
   process.env.COMPLIANCE_PYTHON_PATH ??
@@ -69,6 +77,9 @@ if (complianceChunkBytes === 0 || complianceMaxBundleBytes === 0) {
   throw new Error("Compliance chunk and bundle byte limits must be positive");
 }
 let running = true;
+
+class InvalidOnChainPolicyError extends Error {}
+class ComplianceAnalysisError extends Error {}
 
 function runComplianceTool(label, script, args, rawFile) {
   return new Promise((resolveRun, rejectRun) => {
@@ -254,10 +265,17 @@ async function sendComplianceTransaction(phase, transactionPromise, transactions
 }
 
 async function complianceRegistrationEvent(recordKey) {
-  const events = await registry.queryFilter(
-    registry.filters.ComplianceResultRegistered(recordKey),
-  );
-  return events.at(-1) ?? null;
+  const deploymentBlock = Number(required("CONTRACT_DEPLOYMENT_BLOCK"));
+  let endBlock = await provider.getBlockNumber();
+  while (endBlock >= deploymentBlock) {
+    const fromBlock = Math.max(deploymentBlock, endBlock - blockBatchSize + 1);
+    const events = await registry.queryFilter(
+      registry.filters.ComplianceResultRegistered(recordKey), fromBlock, endBlock,
+    );
+    if (events.length) return events.at(-1);
+    endBlock = fromBlock - 1;
+  }
+  return null;
 }
 
 async function writeComplianceReceipt(outputDirectory, payload) {
@@ -274,6 +292,7 @@ async function uploadComplianceBundle(recordKey, documentHash, outputDirectory) 
   const bundle = await readFile(join(outputDirectory, "compliance-bundle.zip"));
   validateComplianceManifest(manifest, bundle, recordKey, documentHash);
   const transactions = [];
+  let finalizationReceipt;
 
   if (await registry.hasComplianceResult(recordKey)) {
     const result = await registry.readComplianceResult(recordKey);
@@ -325,7 +344,7 @@ async function uploadComplianceBundle(recordKey, documentHash, outputDirectory) 
       chunkIndex += 1;
     }
 
-    await sendComplianceTransaction(
+    finalizationReceipt = await sendComplianceTransaction(
       "finalize",
       complianceRegistry.finalizeComplianceUpload(recordKey),
       transactions,
@@ -342,7 +361,22 @@ async function uploadComplianceBundle(recordKey, documentHash, outputDirectory) 
   }
 
   const result = await registry.readComplianceResult(recordKey);
-  const event = await complianceRegistrationEvent(recordKey);
+  const finalizationTopic = registry.interface.getEvent("ComplianceResultRegistered").topicHash;
+  let event = finalizationReceipt?.logs.find(
+    (log) => equalHex(log.address, CONTRACT_ADDRESS)
+      && equalHex(log.topics[0], finalizationTopic)
+      && equalHex(log.topics[1], recordKey),
+  );
+  if (!event) {
+    try {
+      event = await complianceRegistrationEvent(recordKey);
+    } catch (error) {
+      // The event is only used for receipt metadata. The result and every stored
+      // byte have already been verified above, so a provider's log limit must
+      // not turn a finalized upload into a failed one.
+      console.warn(`Could not look up compliance event for ${recordKey}: ${error.message}`);
+    }
+  }
   await writeComplianceReceipt(outputDirectory, {
     status: "finalized",
     verified: true,
@@ -398,10 +432,42 @@ async function readRawFile(recordKey) {
   }
   const rawFile = Buffer.concat(chunks);
   if (rawFile.length !== Number(record.documentSize)) {
-    throw new Error(`On-chain rawFile size mismatch for ${recordKey}`);
+    throw new InvalidOnChainPolicyError(`On-chain rawFile size mismatch for ${recordKey}`);
   }
   if (sha256(rawFile).toLowerCase() !== record.documentHash.toLowerCase()) {
-    throw new Error(`On-chain rawFile hash mismatch for ${recordKey}`);
+    throw new InvalidOnChainPolicyError(`On-chain rawFile hash mismatch for ${recordKey}`);
+  }
+  if (!equalHex(complianceCommitment(chunks), record.documentChunkCommitment)) {
+    throw new InvalidOnChainPolicyError(`On-chain rawFile chunk commitment mismatch for ${recordKey}`);
+  }
+  const metadataChunks = [];
+  for (let index = 0; index < Number(record.metadataChunkCount); index += 1) {
+    metadataChunks.push(Buffer.from(getBytes(await registry.readMetadataChunk(recordKey, index))));
+  }
+  const metadataBytes = Buffer.concat(metadataChunks);
+  if (metadataBytes.length !== Number(record.metadataSize)
+      || !equalHex(sha256(metadataBytes), record.metadataHash)
+      || !equalHex(complianceCommitment(metadataChunks), record.metadataChunkCommitment)) {
+    throw new InvalidOnChainPolicyError(`On-chain metadata integrity mismatch for ${recordKey}`);
+  }
+  let metadata;
+  try {
+    metadata = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(metadataBytes));
+  } catch {
+    throw new InvalidOnChainPolicyError(`On-chain metadata is not valid UTF-8 JSON for ${recordKey}`);
+  }
+  const metadataDocumentHash = typeof metadata?.documentHash === "string"
+    ? (metadata.documentHash.startsWith("0x") ? metadata.documentHash : `0x${metadata.documentHash}`)
+    : "";
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+      || metadata.developer !== record.publisherEntity
+      || metadata.publisherEntity !== record.publisherEntity
+      || metadata.applicationName !== record.serviceName
+      || metadata.serviceName !== record.serviceName
+      || metadata.policyVersion !== record.policyVersion
+      || metadata.effectiveDate !== record.effectiveDate
+      || !equalHex(metadataDocumentHash, record.documentHash)) {
+    throw new InvalidOnChainPolicyError(`On-chain metadata identity mismatch for ${recordKey}`);
   }
   return { rawFile, record };
 }
@@ -418,23 +484,27 @@ async function callOffchainTool({ detectedAt, recordKey }) {
     console.log(`[${detectedAt}] restoring existing on-chain compliance result`);
     await restoreFinalizedCompliance(recordKey, outputDirectory);
   } else {
-    await runComplianceTool(
-      "P1/P2/P3 compliance adapter",
-      join(complianceRoot, "run_compliance.py"),
-      [
-        "--output-dir",
-        outputDirectory,
-        "--record-key",
-        recordKey,
-        "--document-hash",
-        record.documentHash,
-        "--high-risk",
-        complianceHighRisk,
-        "--model",
-        complianceModel,
-      ],
-      rawFile,
-    );
+    try {
+      await runComplianceTool(
+        "P1/P2/P3 compliance adapter",
+        join(complianceRoot, "run_compliance.py"),
+        [
+          "--output-dir",
+          outputDirectory,
+          "--record-key",
+          recordKey,
+          "--document-hash",
+          record.documentHash,
+          "--high-risk",
+          complianceHighRisk,
+          "--model",
+          complianceModel,
+        ],
+        rawFile,
+      );
+    } catch (error) {
+      throw new ComplianceAnalysisError(error.message, { cause: error });
+    }
   }
   console.log(`[${detectedAt}] uploading compliance bundle for ${recordKey}`);
   await uploadComplianceBundle(recordKey, record.documentHash, outputDirectory);
@@ -445,8 +515,8 @@ function positiveInteger(name, fallback) {
   const value = process.env[name];
   if (value === undefined) return fallback;
   const parsed = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(`${name} must be a non-negative integer`);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
   }
   return parsed;
 }
@@ -455,58 +525,49 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function loadState(statePath, initialBlock, latestBlock, chainIdentity) {
-  try {
-    const state = JSON.parse(await readFile(statePath, "utf8"));
-    if (state.chainIdentity !== chainIdentity) {
-      console.log("Listener state belongs to a different chain instance; resetting cursor.");
-      return { chainIdentity, lastProcessedBlock: initialBlock, processedEvents: {} };
-    }
-    const lastProcessedBlock = Number(state.lastProcessedBlock);
-    if (
-      !Number.isSafeInteger(lastProcessedBlock) ||
-      lastProcessedBlock < initialBlock ||
-      lastProcessedBlock > latestBlock
-    ) {
-      console.log("Listener cursor is outside this deployment's block range; resetting cursor.");
-      return { chainIdentity, lastProcessedBlock: initialBlock, processedEvents: {} };
-    }
-    return {
-      chainIdentity,
-      lastProcessedBlock,
-      processedEvents: state.processedEvents ?? {},
-    };
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      console.warn(`Could not read listener state; starting fresh: ${error.message}`);
-    }
-    return { chainIdentity, lastProcessedBlock: initialBlock, processedEvents: {} };
-  }
-}
-
 async function saveState(statePath, state) {
+  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
   const temporaryPath = `${statePath}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await rename(temporaryPath, statePath);
 }
 
 async function processBlockRange(fromBlock, toBlock, state, statePath, eventTopic) {
-  const logs = await provider.getLogs({
-    address: CONTRACT_ADDRESS,
-    topics: [eventTopic],
-    fromBlock,
-    toBlock,
-  });
+  let logs;
+  try {
+    logs = await provider.getLogs({
+      address: CONTRACT_ADDRESS,
+      topics: [eventTopic],
+      fromBlock,
+      toBlock,
+    });
+  } catch (error) {
+    if (fromBlock === toBlock) throw error;
+    const middle = Math.floor((fromBlock + toBlock) / 2);
+    await processBlockRange(fromBlock, middle, state, statePath, eventTopic);
+    await processBlockRange(middle + 1, toBlock, state, statePath, eventTopic);
+    return;
+  }
 
   for (const log of logs) {
     const eventId = `${log.transactionHash}:${log.index}`;
     if (state.processedEvents[eventId] !== undefined) continue;
 
     const parsed = registry.interface.parseLog(log);
-    await callOffchainTool({
-      detectedAt: new Date().toISOString(),
-      recordKey: parsed.args.recordKey,
-    });
+    try {
+      await callOffchainTool({
+        detectedAt: new Date().toISOString(),
+        recordKey: parsed.args.recordKey,
+      });
+    } catch (error) {
+      if (!(error instanceof InvalidOnChainPolicyError)) throw error;
+      console.error(`Skipping invalid policy ${parsed.args.recordKey}: ${error.message}`);
+      state.invalidEvents[eventId] = {
+        recordKey: parsed.args.recordKey,
+        blockNumber: log.blockNumber,
+        reason: error.message,
+      };
+    }
 
     state.processedEvents[eventId] = log.blockNumber;
     await saveState(statePath, state);
@@ -524,32 +585,39 @@ async function processBlockRange(fromBlock, toBlock, state, statePath, eventTopi
 
 async function listen() {
   const network = await provider.getNetwork();
+  if (network.chainId !== BASE_CHAIN_ID) {
+    throw new Error(`RPC returned chain ID ${network.chainId}; expected Base Mainnet ${BASE_CHAIN_ID}`);
+  }
+  const code = await provider.getCode(CONTRACT_ADDRESS);
+  if (code === "0x") {
+    throw new Error(`No contract bytecode found at ${CONTRACT_ADDRESS} on Base Mainnet`);
+  }
+  const expectedCodeHash = required("CONTRACT_RUNTIME_CODE_HASH");
+  if (keccak256(code).toLowerCase() !== expectedCodeHash.toLowerCase()) {
+    throw new Error(`CONTRACT_RUNTIME_CODE_HASH does not match the code at ${CONTRACT_ADDRESS}`);
+  }
   if (!(await registry.complianceUploaders(complianceUploaderAddress))) {
     throw new Error(
       `Compliance uploader ${complianceUploaderAddress} is not authorized by the contract`,
     );
   }
   const chainId = network.chainId.toString();
-  const defaultConfirmations = chainId === "31337" ? 0 : 3;
-  const confirmations = positiveInteger("EVENT_CONFIRMATIONS", defaultConfirmations);
+  const confirmations = positiveInteger("EVENT_CONFIRMATIONS", 3);
   const latestBlock = await provider.getBlockNumber();
-  const genesisBlock = await provider.getBlock(0);
-  const configuredStartBlock = process.env.CONTRACT_DEPLOYMENT_BLOCK;
-  const deploymentBlock = configuredStartBlock
-    ? positiveInteger("CONTRACT_DEPLOYMENT_BLOCK", latestBlock)
-    : null;
-  const initialBlock = deploymentBlock === null ? latestBlock : deploymentBlock - 1;
-  const deploymentAnchor = deploymentBlock === null
-    ? genesisBlock.hash
-    : (await provider.getBlock(deploymentBlock))?.hash;
+  required("CONTRACT_DEPLOYMENT_BLOCK");
+  const deploymentBlock = positiveInteger("CONTRACT_DEPLOYMENT_BLOCK", 0);
+  if (deploymentBlock > latestBlock) {
+    throw new Error(`CONTRACT_DEPLOYMENT_BLOCK ${deploymentBlock} is above the Base head ${latestBlock}`);
+  }
+  const initialBlock = deploymentBlock - 1;
+  const deploymentAnchor = (await provider.getBlock(deploymentBlock))?.hash;
   if (!deploymentAnchor) {
     throw new Error(`Contract deployment block ${deploymentBlock} was not found`);
   }
   const chainIdentity = [
     chainId,
-    genesisBlock.hash,
     CONTRACT_ADDRESS.toLowerCase(),
-    deploymentBlock ?? "latest",
+    deploymentBlock,
     deploymentAnchor,
   ].join(":");
   const statePath =
@@ -564,7 +632,12 @@ async function listen() {
     `chainId=${chainId} confirmations=${confirmations} lastProcessedBlock=${state.lastProcessedBlock}`,
   );
 
+  let analysisPaused = false;
   while (running) {
+    if (analysisPaused) {
+      await delay(pollIntervalMs);
+      continue;
+    }
     try {
       const headBlock = await provider.getBlockNumber();
       const safeBlock = headBlock - confirmations;
@@ -575,7 +648,14 @@ async function listen() {
         await processBlockRange(fromBlock, toBlock, state, statePath, eventTopic);
       }
     } catch (error) {
-      console.error(`Event polling failed; retrying: ${error.message}`);
+      if (error instanceof ComplianceAnalysisError) {
+        // Keep the cursor before this event so restarting retries it exactly once.
+        // Repeated automatic attempts can incur paid model calls every poll.
+        analysisPaused = true;
+        console.error(`Compliance analysis failed; listener paused until restart: ${error.message}`);
+      } else {
+        console.error(`Event polling failed; retrying: ${error.message}`);
+      }
     }
 
     if (running) await delay(pollIntervalMs);

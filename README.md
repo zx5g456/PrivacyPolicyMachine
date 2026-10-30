@@ -1,6 +1,6 @@
 # Privacy Policy Machine
 
-A runnable prototype for registering, querying, updating, and verifying privacy policies with a small web UI, SQLite storage, and a deployed Solidity registry.
+A local web application backed by a registry on Base Mainnet (chain ID `8453`). Policy files, metadata, and compliance ZIPs are stored in public contract storage.
 
 ## Features
 
@@ -11,7 +11,7 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - Verify a policy by entering the application name and uploading a file or pasting policy text.
 - Switch between prototype developers in the top bar.
 - Update only the policies uploaded by the selected developer.
-- Prevent duplicate policy content from being registered twice.
+- Prevent duplicate policy content through the application; the contract rejects repeated chunk commitments.
 - Analyze every new or updated policy with the local AI model and require human review before registration.
 
 ## Project Structure
@@ -20,130 +20,76 @@ A runnable prototype for registering, querying, updating, and verifying privacy 
 - `web/static/app.js`: frontend workflow and API calls.
 - `web/static/styles.css`: UI styling.
 - `server/app.py`: HTTP server, API routes, policy registration, query, update, and verification.
-- `server/storage.py`: SQLite storage layer.
 - `server/processor.py`: AI metadata constraints, hash generation, validation, and report generation.
 - `server/llm_models.py`: local LLM result models and domain errors.
 - `server/llm_client.py`: Ollama client, prompt, and connection configuration.
 - `server/llm_processor.py`: policy chunking, evidence validation, retries, and result aggregation.
-- `server/blockchain.py`: Web3 client for resumable chunk uploads, contract-storage reads, and independent content audits.
+- `server/blockchain.py`: Web3 client for wallet transaction preparation, contract-storage reads, and independent content audits.
 - `contracts/TrustedPolicyRegistry.sol`: Solidity policy registry used by the web application.
-- `scripts/deploy-contract.js`: deploys the registry to the configured RPC network.
+- `config/base-mainnet.env`: local, Git-ignored file for the Base RPC, contract, wallet, and AI account settings.
+- `scripts/base-mainnet.js`: explicit Base Mainnet deployment, authorization, and read-only status commands.
 - `offchain-listener/listener.js`: listens for successful on-chain policy registrations, reconstructs the registered raw file, and runs compliance P1/P2/P3.
 - `compliance tool/run_compliance.py`: adapts one on-chain raw file to the directory-based P1/P2/P3 command interfaces.
 - `compliance tool/P1/high_risk_detection.py`: classifies the policy with the GPT API and selects the P3 checklist.
 - `compliance tool/P2/information_extract.py`: extracts policy information with the GPT API.
 - `compliance tool/P3/evaluate_checklist.py`: evaluates the extracted information against the compliance checklist.
-- `data/policies.db`: local SQLite database.
+- `data/policies.db`: retained legacy SQLite file; the Base Mainnet application does not read or migrate it.
 
-## Run locally
+## Run locally with Base Mainnet
 
-### Deploy the contract to Base Sepolia
-
-The testnet deployment commands are separate from `npm run dev`, which starts
-the local Hardhat environment. They do not yet switch the Python application or
-listener to testnet wallet signing.
-
-```bash
-npm run contract:compile
-npm run sepolia:wallet
-npm run sepolia:status
-```
-
-The wallet command creates a dedicated deployer/policy wallet and compliance
-wallet once, then reuses them. It prints only public addresses. Private keys are
-stored unencrypted in `data/base-sepolia/wallet.json` with owner-only permissions;
-the entire directory is excluded from Git. Keep a secure backup of this file.
-These wallets are intended only for testing.
-
-Request **Base Sepolia ETH** for the deployer from the
-[Coinbase faucet](https://portal.cdp.coinbase.com/products/faucet). The deployer
-pays to create the contract and authorize the compliance wallet. The compliance
-wallet only needs funds when it starts uploading compliance results.
-
-```bash
-npm run sepolia:deploy
-```
-
-The command requires chain ID `84532`, signs transactions locally, verifies the
-deployed owner and compliance authorization, and saves the address, deployment
-block, transaction hashes, and bytecode hashes in
-`data/base-sepolia/deployment.json`. It saves signed transactions before
-broadcasting so rerunning the command can resume an interrupted deployment.
-A completed deployment is verified and reused rather than redeployed.
-
-The default RPC is `https://sepolia.base.org`; set `BASE_SEPOLIA_RPC_URL` to use
-another Base Sepolia endpoint. A process crash can leave `deploy.lock`; inspect
-the saved transaction hashes and make sure no deployment process is running
-before removing that lock. Do not delete the wallet or pending transaction
-journal to retry a deployment.
-
-### Local development
-
-Install and compile once:
+Install the local web, contract, and listener dependencies:
 
 ```bash
 npm install
-npm run contract:compile
+cd offchain-listener && npm install && cd ..
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+npm run contract:compile
+ollama pull qwen3.5:9b
 ```
 
-After that, the normal startup command is:
+Copy `config/base-mainnet.env.example` to `config/base-mainnet.env` if the filled file does not already exist. This is the **one local file to fill in** for chain access and account settings. It is excluded from Git. The current workspace includes an unfilled copy. Use a Base Mainnet HTTPS RPC that supports `eth_getLogs` with enough request capacity for chunk reads and event polling. The public `https://mainnet.base.org` endpoint can return HTTP 429 even for small event queries; use a provider endpoint for reliable operation. `EXPECTED_CHAIN_ID` must remain `8453`.
+
+| Setting | What to put in it |
+| --- | --- |
+| `RPC_URL` | Base Mainnet HTTPS RPC endpoint. An endpoint with an API token is acceptable because this file is ignored. |
+| `PUBLISHER_WALLETS_JSON` | Map each exact developer name shown in the UI to that developer's public wallet address. Developers connect these wallets in the browser and pay their own Base ETH fees. No developer private keys are stored by this application. |
+| `BASE_DEPLOYER_PRIVATE_KEY` | Dedicated deployment/admin wallet private key, used only by the explicit deployment command. It pays for contract creation and initial authorization transactions. |
+| `BASE_OWNER_ADDRESS` | Optional future owner, such as a multisig. The deployment wallet remains owner until that address calls `acceptOwnership()`. |
+| `COMPLIANCE_PRIVATE_KEY` | Dedicated listener wallet private key. This wallet pays Base ETH to store compliance ZIPs and must be authorized by the contract. |
+| `OPENAI_API_KEY` | API key used by the P1/P2/P3 compliance pipeline. |
+| `CONTRACT_ADDRESS`, `CONTRACT_DEPLOYMENT_BLOCK`, `CONTRACT_RUNTIME_CODE_HASH` | Filled automatically by the deployment command after its transactions are verified, or manually for an existing verified deployment. Local startup requires the runtime code hash and checks it against Base. |
+
+Fund the deployment/admin wallet for contract setup, each developer wallet for its own policy uploads, and the separate platform compliance wallet for ZIP uploads. These are **real Base ETH transactions**. The complete policy text, metadata, and compliance report become publicly recoverable contract data; only upload material intended to be public.
+
+### Deploy once, explicitly
+
+After filling the RPC, developer addresses, deployment key, and compliance key:
+
+```bash
+npm run base:status
+npm run contract:compile
+npm run base:deploy
+```
+
+`base:status` reads chain state and balances without sending transactions. `base:deploy` is the only deployment command and requires chain ID `8453`; `npm run dev` never deploys or authorizes. Deployment creates the registry with the deployer as initial owner, registers each `PUBLISHER_WALLETS_JSON` address, authorizes the compliance wallet, and optionally proposes ownership transfer to `BASE_OWNER_ADDRESS`. The target owner must call `acceptOwnership()` separately. The command records signed transactions before broadcast in Git-ignored `data/base-mainnet/pending-transactions.json`, allowing an interrupted run to resume without producing another contract. Verified transaction hashes and code hashes are saved in `data/base-mainnet/deployment.json`.
+
+After deployment, changing a developer wallet in the config file also requires
+the current contract owner to call `setPublisherOwner(developerName, newAddress)`
+on Base Mainnet. Changing only the local file does not change the on-chain role;
+`npm run dev` checks that they match before starting.
+
+If `data/base-mainnet/deploy.lock` remains after a crash, inspect the pending transaction hashes on BaseScan and confirm no deployment process remains before deleting that lock. Do not delete the transaction journal to retry a pending deployment.
+
+### Start the local services
 
 ```bash
 npm run dev
 ```
 
-This single command compiles the contract, starts a fresh Hardhat chain,
-deploys the contract, passes its RPC URL and address to the event listener and
-Python web server, and starts both services. Press `Ctrl+C` once to stop all of
-them.
+This command compiles the ABI, checks that the RPC is Base Mainnet, verifies the deployed contract and configured wallet authorizations, and starts the local Python web server and compliance event listener. It does not start a local blockchain. Developers connect their own Base wallet in the web UI and approve policy transactions there. The listener signs compliance uploads with `COMPLIANCE_PRIVATE_KEY`. Press `Ctrl+C` to stop the local processes; Base data remains on-chain.
 
-The multi-terminal sequence below is only needed when debugging an
-individual component.
-
-Then use three terminals. Hardhat is the real local EVM used by the web app;
-restarting it clears the local chain and requires another deployment.
-
-Terminal 1 — start the chain:
-
-```bash
-npm run chain
-```
-
-Terminal 2 — deploy, then copy the values printed by this command:
-
-```bash
-npm run contract:deploy
-```
-
-Terminal 3 — export those values and start the web server:
-
-```bash
-export RPC_URL=http://127.0.0.1:8545
-export CONTRACT_ADDRESS=0xAddressPrintedByDeploy
-export CONTRACT_DEPLOYMENT_BLOCK=1
-.venv/bin/python -m server.app
-```
-
-Every create, reviewed registration, and update submitted in the web UI now
-sends a manifest transaction, one transaction per content chunk, and a finalization
-transaction before its SQL row is saved. Keep the chain running while using the
-application.
-
-The server tries `http://127.0.0.1:8000` first. If port `8000` is already in use, it automatically chooses the next available port and prints the URL, for example:
-
-```text
-Privacy Policy Machine running at http://127.0.0.1:8001
-```
-
-Open the printed URL in your browser.
-
-You can also force a port:
-
-```bash
-PORT=8002 .venv/bin/python -m server.app
-```
+The server prints its local URL, normally `http://127.0.0.1:8000`. If that port is busy, it chooses the next available port. `PORT` can be set in `config/base-mainnet.env` to request a specific port.
 
 ## UI Workflow
 
@@ -151,7 +97,7 @@ PORT=8002 .venv/bin/python -m server.app
 2. In `Create Policy`, enter an `Application Name` and upload a policy file.
 3. Submit the file for local AI analysis. Nothing is persisted during analysis.
 4. Review and edit the AI-extracted metadata, details, and evidence.
-5. Confirm the review to upload the content chunks and finalize the policy with the UUID and upload-time version assigned to the review draft.
+5. Connect the wallet assigned to the selected developer. Confirm the review, switch the wallet to Base Mainnet if prompted, and approve each manifest, content-chunk, and finalization transaction. The developer wallet pays the Base ETH fees. If interrupted, reopen the draft and reselect the identical file to resume after its SHA-256 is checked.
 6. Use `Query` to search by application name. `Latest Policies` shows the latest version of each policy, and the latest match's full policy text is shown in the Query panel. Click `Previous versions` to inspect older uploads, including the initial version, or `Latest version` to return to the current upload.
 7. Use `Verification` by entering the application name and either uploading a policy file or pasting policy text.
 8. Use `Update Policy` to analyze and review a new version. The dropdown only shows policies uploaded by the currently selected developer.
@@ -161,7 +107,7 @@ PORT=8002 .venv/bin/python -m server.app
 ### `POST /api/analyze`
 
 Analyze policy text with the local Ollama model and return a review draft. This
-preview endpoint does not write to SQLite or the blockchain. Its response uses
+preview endpoint does not write to the blockchain. Its response uses
 `uploadMethod=ai` and `requiresReview=true`.
 
 Required multipart fields:
@@ -180,16 +126,36 @@ extracted values, evidence, details, and review flags. Reusing that reviewed dra
 allows an interrupted on-chain upload to resume. `permittedUsage` is extracted
 independently from `processingPurpose`.
 
-### `POST /api/policies/reviewed`
+### `GET /api/config`
 
-Register an AI-reviewed draft. Required multipart fields are `applicationName`,
-`developer`, the original `rawFile`, and the approved `metadataJson`. The server
-validates the draft ID and upload-time version assigned by `/api/analyze`, then
-adds the hashes and finalized identity metadata.
+Return the public Base chain ID, deployed contract address, and developer wallet
+addresses required by the browser. Private keys and private RPC credentials are
+never returned.
+
+### `POST /api/policies/prepare`
+
+Prepare calls for a reviewed policy upload. The server validates the draft,
+checks the configured developer wallet, and returns the exact contract calls
+remaining for that version. It does not sign or send transactions. The browser
+wallet submits each call on Base Mainnet.
+
+Required multipart fields are `workflow` (`create` or `update`), `developer`,
+`walletAddress`, the original `rawFile`, and approved `metadataJson`. A create
+also needs `applicationName`; an update needs the existing `policyId`. Optional
+fields include `policyUrl`, `effectiveDate`, and `changeSummary`.
+
+### `POST /api/policies/complete`
+
+After the wallet transaction receipts succeed, send JSON containing the
+`recordKey` returned by `/prepare`. The server reads the finalized contract
+record and returns the policy, metadata, report, and chain details. A partially
+uploaded version cannot complete; repeat `/prepare` with the same draft and
+file to obtain only the remaining calls.
 
 ### `GET /api/policies`
 
-List stored policy records.
+List finalized Base Mainnet policy records, rebuilt from contract events and
+verified contract content.
 
 Optional query parameter:
 
@@ -219,20 +185,11 @@ Example:
 
 Read the latest stored policy for a policy ID together with the matching Solidity contract record.
 
-### `POST /api/policies/update`
+### `GET /api/records/{recordKey}/raw`
 
-Update an existing policy ID with a new uploaded file.
-
-Required multipart fields:
-
-- `policyId`: existing policy ID.
-- `developer`: current prototype developer.
-- `rawFile`: new uploaded policy file.
-- `metadataJson`: AI-extracted metadata approved on the review page.
-
-The server only allows the update when the selected developer matches the latest
-record's developer. Updates must pass through `/api/analyze` and human review
-before this endpoint is called.
+Download the exact original file bytes reconstructed from contract storage after
+checking the file hash, length, and chunk commitment. This is useful for files
+that cannot be represented faithfully as UTF-8 text in a JSON response.
 
 ### `POST /api/verify`
 
@@ -245,8 +202,8 @@ Required multipart fields:
 
 Verification compares:
 
-- submitted policy text against the latest SQL record after normalizing case, whitespace, and punctuation.
-- submitted and SQL hashes against content reconstructed from contract storage.
+- submitted policy text against the latest on-chain record after normalizing case, whitespace, and punctuation.
+- submitted bytes and the on-chain hash against content reconstructed from contract storage.
 - reconstructed document and metadata hashes, sizes, chunk counts, and ordered chunk commitments against the finalized contract record.
 - publisher, service name, and upload-time version against the contract record.
 
@@ -266,61 +223,50 @@ curl http://127.0.0.1:8000/api/analyze \
 
 ## Data Notes
 
-- Application name is stored in the SQL column `policyName`.
-- Database records, API payloads, and canonical metadata JSON use camelCase keys throughout.
+- Application name is stored as `serviceName` in the contract and `policyName` in the API response.
+- API payloads and canonical metadata JSON use camelCase keys throughout.
 - `metadataDetails` preserves a concise explanation for every reviewable metadata field; `metadataEvidence` retains the supporting policy quotations.
 - `policyVersion` is no longer entered by the user. It is generated from upload time.
-- The developer switcher is only a prototype display control. There is no login system yet.
-- If incoming policy content already exists, the API returns `409 Conflict` and does not write a new SQL or chain record.
+- The developer switcher selects a publisher label. The browser wallet must match the address authorized on-chain for that label.
+- If incoming policy content already exists, the API returns `409 Conflict` and does not create a new chain record.
 - `sources/dataset/` is ignored by Git so the local dataset is not uploaded.
 
-### Historical versions and local chain resets
+### Historical local records
 
-Initial uploads and updates use the same registration path. Each saved version
-has its own transaction hash and record key, plus the registry contract address;
-versions registered to the same registry share that contract address. The UI
-shows the saved registration receipt even when that version cannot be found on
-the currently connected chain. A saved receipt alone is not current on-chain
-verification.
-
-`npm run dev` starts a fresh, in-memory Hardhat chain each time. Stopping and
-restarting it clears its on-chain records, while `data/policies.db` retains the
-SQL history. The fresh deployment can reuse the same contract address, so an
-unchanged address does not mean that the old chain data is still present. If an
-initial upload predates the restart, the new chain's version index will contain
-only versions registered after that restart. The UI distinguishes a missing
-current-chain record from an unavailable chain connection.
-
-To retain chain history during local development, keep the Hardhat node running
-and restart only the Python server or listener using the same deployment
-configuration. Preserving chain history across node restarts requires a
-persistent network or node storage; SQL history cannot restore the original
-transactions of a discarded Hardhat chain.
+The existing `data/policies.db` file is preserved as a legacy archive and is
+ignored by Git. Runtime code no longer reads or writes it. Records that existed
+only on the old local Hardhat chain are **not** registered on Base Mainnet.
+Starting or stopping the local web server does not change Base Mainnet history.
 
 ## Chunked L2 Storage
 
-Registration is a three-stage protocol:
+Policy registration stores all bytes on Base Mainnet:
 
 1. `beginPolicyRegistration` creates a pending manifest containing identity,
-   expected byte sizes, and SHA-256 hashes.
+   expected byte sizes, and declared SHA-256 hashes.
 2. `appendDocumentChunk` and `appendMetadataChunk` write exact byte slices to
    contract storage in strictly increasing index order. Each successful chunk is
    committed by `keccak256(previousCommitment, index, byteLength, sha256(chunk))`.
-3. `finalizePolicyRegistration` succeeds only when both declared byte lengths
-   have been stored. Only then is the record added to the public version index.
+3. `finalizePolicyRegistration` succeeds after both declared byte lengths are
+   stored. Only then is the record added to the public version index. The chain
+   commits each chunk and its order and prevents a duplicate document with the
+   same chunk sequence. The web server and independent auditors reconstruct the
+   complete bytes and check the manifest's whole-file SHA-256.
 
-The server defaults to 8 KiB transactions and never exceeds the contract's
-24 KiB per-chunk ceiling. Configure a smaller starting size for a target L2 with:
+Chunk size is bounded by the contract's 24 KiB per-chunk ceiling. The browser
+wallet prompts the developer for each policy transaction. To start with smaller
+chunks, set the following in `config/base-mainnet.env`:
 
 ```bash
-export ONCHAIN_CHUNK_BYTES=4096
+ONCHAIN_CHUNK_BYTES=4096
 ```
 
-Before sending a chunk, the server estimates its gas. If the estimate cannot fit,
-the chunk is reduced and retried before any transaction is sent. If a request is
-interrupted after confirmed chunks, submitting the same reviewed draft reads the
-pending manifest, validates every stored prefix byte, and resumes at the next
-index. Pending uploads are not visible as trusted records.
+This contract accepts at most 256 KiB of original policy bytes and 128 KiB of
+metadata JSON per version. Preparation rejects larger files before the browser
+wallet sends a transaction.
+
+Pending uploads are not visible as trusted records until finalization. Keep the
+same reviewed draft and wallet available when resuming an interrupted upload.
 
 The LLM uses a separate, overlapping text-chunk process for model context. LLM
 chunks are character slices; on-chain chunks are exact bytes and must not be
@@ -334,7 +280,7 @@ isolated temporary input directory and runs the directory-based P1, P2, and P3
 commands. The local result directory is:
 
 ```text
-data/compliance-results/<recordKey>/
+data/compliance-results/8453/<contractAddress>/<recordKey>/
 ├── p1-risk.json
 ├── p2-extraction.json
 ├── p3-checklist.json
@@ -352,17 +298,22 @@ the next attempt reuses the local bundle without calling GPT again. If a
 finalized result is replayed with no local files, the listener restores the
 local files from the on-chain ZIP.
 
-The GPT API key is read locally from
-`data/gpt.zshrc`; that file can contain either the bare key or an
-`OPENAI_API_KEY=...` assignment and is ignored by Git.
+The GPT API key is read from `OPENAI_API_KEY` in the Git-ignored
+`config/base-mainnet.env` file.
 
 The listener defaults to `COMPLIANCE_HIGH_RISK=auto`, so P1's classification
 selects the high- or low-risk P3 checklist. Set it to `yes` or `no` to override
-that selection. `npm run dev` uses Hardhat account 1 as the dedicated,
-contract-authorized compliance uploader. `COMPLIANCE_UPLOADER_ACCOUNT`,
-`COMPLIANCE_GPT_MODEL`, `COMPLIANCE_PYTHON_PATH`, `COMPLIANCE_OUTPUT_DIR`,
-`COMPLIANCE_CHUNK_BYTES`, `COMPLIANCE_MAX_BUNDLE_BYTES`, and `GPT_CONFIG_PATH`
-can override the corresponding defaults. The default bundle limit is 1 MiB.
+that selection. `npm run dev` uses the dedicated, contract-authorized wallet in
+`COMPLIANCE_PRIVATE_KEY`. `COMPLIANCE_GPT_MODEL`, `COMPLIANCE_PYTHON_PATH`,
+`COMPLIANCE_OUTPUT_DIR`, `COMPLIANCE_CHUNK_BYTES`, and
+`COMPLIANCE_MAX_BUNDLE_BYTES` can override the corresponding defaults. The
+default bundle limit is 1 MiB.
+The contract also caps a compliance ZIP at 1 MiB; an oversized result is not
+truncated or registered. The listener records an error and retries after the
+underlying output or contract limit is addressed.
+If P1, P2, or P3 fails, the listener pauses analysis to avoid repeated paid
+model calls. Fix the error and restart `npm run dev` to retry the same policy.
+Once a bundle exists locally, upload retries reuse it without calling the model.
 
 Solidity functions still use the `calldata` data-location keyword for external
 parameters. This is only an EVM input type: the application no longer treats
@@ -392,9 +343,12 @@ TrustedPolicyRecord
 
 The complete raw file and metadata JSON are permanently stored in the contract's
 chunk mappings. The contract computes each chunk hash and ordered commitment as
-chunks arrive. The server supplies the interoperable whole-content SHA-256 in the
-pending manifest, then reconstructs the finalized storage and verifies that hash.
-This avoids concatenating an arbitrarily large file inside one finalization call.
+chunks arrive. The server supplies a whole-content SHA-256 claim in the pending
+manifest, then reconstructs the finalized storage and verifies that claim. The
+contract cannot prove the whole-file SHA-256 at these file limits without
+exceeding gas limits; direct contract callers can submit a false claim, which
+the server and independent audit reject. Duplicate prevention on-chain uses the
+chunk commitment computed from actual submitted bytes.
 The API's UUID `policyId` remains an application identifier inside canonical
 metadata; `recordKey` is the on-chain identifier for a policy version.
 
@@ -409,8 +363,9 @@ commitments without trusting SQLite:
 ```bash
 .venv/bin/python scripts/audit-registration.py \
   0xRecordKeyOrFinalizationTransactionHash \
-  --rpc-url http://127.0.0.1:8545 \
+  --rpc-url https://mainnet.base.org \
   --contract-address 0xContractAddress \
+  --deployment-block 12345678 \
   --output-dir recovered-audit
 ```
 
@@ -423,24 +378,22 @@ GET /api/audit/{recordKey-or-finalization-txHash}
 ```
 
 Contract storage is public. Do not register secrets or personal information that
-should not be publicly recoverable. A restarted `npm run dev` creates a new
-ephemeral Hardhat chain, so durable third-party audit requires a persistent L2.
+should not be publicly recoverable. Use the same Base Mainnet contract address
+for independent audits after restarting the local services.
 
 ## Off-chain Event Listener
 
 Every successful `finalizePolicyRegistration` transaction emits the contract's
 `TrustedPolicyRecordRegistered` event. Its indexed `recordKey` is the unique
-on-chain ID for that policy version; this is the `policyId` printed by the
-experimental listener. The UUID called `policyId` by the local API remains an
-off-chain-only identifier.
+on-chain ID for that policy version. The UUID called `policyId` by the local API
+is stored inside the on-chain metadata JSON.
 
-Install and run the listener after deploying `TrustedPolicyRegistry.sol`:
+The normal `npm run dev` command starts the listener. To run it alone after
+deploying `TrustedPolicyRegistry.sol` and filling `config/base-mainnet.env`:
 
 ```bash
 cd offchain-listener
 npm install
-RPC_URL=http://127.0.0.1:8545 \
-CONTRACT_ADDRESS=0xYourDeployedContractAddress \
 npm start
 ```
 
@@ -452,54 +405,17 @@ runs P1/P2/P3, and uploads the verified result bundle:
 [2026-09-21T02:30:45.123Z] compliance bundle finalized for 0x...
 ```
 
-The listener uses provider polling. The uploader must be authorized by the
-contract owner. For manual local startup, either use the deployer account or set
-the same `COMPLIANCE_UPLOADER_ACCOUNT` when deploying and running the listener.
+The listener uses provider polling with three confirmations by default. It signs
+with `COMPLIANCE_PRIVATE_KEY` and requires that wallet to be authorized by the
+contract owner. Its local cursor is stored in Git-ignored
+`data/base-mainnet/listener-state.json` when started through `npm run dev`.
 
 ### Complete web-to-contract event test
 
-Install the root contract dependencies and compile once:
-
-```bash
-npm install
-npm run contract:compile
-```
-
-Use four terminals. Keep the chain, listener, and web server running.
-
-Terminal 1 — start the local Hardhat chain:
-
-```bash
-npm run chain
-```
-
-Terminal 2 — deploy the contract, copy the three `export` lines it prints, then
-start the listener with those variables:
-
-```bash
-npm run contract:deploy
-export RPC_URL=http://127.0.0.1:8545
-export CONTRACT_ADDRESS=0xAddressPrintedByDeploy
-export CONTRACT_DEPLOYMENT_BLOCK=1
-cd offchain-listener
-npm start
-```
-
-Terminal 3 — use the same three exported values and start the web server:
-
-```bash
-export RPC_URL=http://127.0.0.1:8545
-export CONTRACT_ADDRESS=0xAddressPrintedByDeploy
-export CONTRACT_DEPLOYMENT_BLOCK=1
-.venv/bin/python -m server.app
-```
-
-Terminal 4 — open the URL printed by the server and create or update a policy.
-The API response includes its finalization transaction, chunk transaction list,
-and block data. At the same time,
-Terminal 2 prints the event detection time, pipeline output, chunk upload, and
-the same on-chain policy ID. The Records page shows pending/uploading/finalized
-status, verifies the chain bundle, displays all four files, and downloads the
-complete ZIP.
-Restarting the Hardhat node creates a fresh chain, so deploy the contract again
-and use its new address after every restart.
+Run `npm run dev`, connect a configured developer's wallet to Base Mainnet in
+the browser, and upload a small policy that is safe to publish. The wallet
+approves the policy manifest, content chunks, and finalization. After three
+confirmations, the listener detects the registration,
+runs P1/P2/P3, and uploads the report ZIP with the compliance wallet. The
+Records page shows the result and lets you download the complete ZIP. Every
+transaction incurs real Base ETH fees.

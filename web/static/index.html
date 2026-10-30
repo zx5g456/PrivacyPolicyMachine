@@ -22,6 +22,10 @@
               <option value="charlie">Charlie</option>
             </select>
           </label>
+          <div class="wallet-controls">
+            <button class="outline wallet-connect" id="connectWallet" type="button">Connect Wallet</button>
+            <span class="wallet-status" id="walletStatus" role="status" aria-live="polite">Wallet not connected</span>
+          </div>
           <div class="status-pill" id="systemStatus">Checking chain...</div>
         </div>
       </header>
@@ -83,8 +87,8 @@
                   <strong id="txValue">No transaction yet</strong>
                 </div>
                 <div>
-                  <span>SQL Storage</span>
-                  <strong id="storageValue">Idle</strong>
+                  <span>Base Record Key</span>
+                  <strong id="storageValue">No registration yet</strong>
                 </div>
                 <div>
                   <span>Chain Block</span>
@@ -213,10 +217,14 @@
                 <pre class="review-policy" id="reviewPolicy"></pre>
               </aside>
             </div>
+            <label class="resume-file" id="resumeFileLabel" hidden>
+              Reattach the same policy file to resume this Base upload
+              <input id="resumeFile" type="file" accept=".txt,.md,.html,.json,.policy,text/*">
+            </label>
             <div class="review-actions">
-              <button class="primary" id="confirmReview" type="button">Confirm and Register</button>
+              <button class="primary" id="confirmReview" type="button">Confirm and Register on Base</button>
             </div>
-            <div class="verification" id="reviewStatus">Review every field before registration.</div>
+            <div class="verification" id="reviewStatus">Review every field before registration. Your connected developer wallet pays Base Mainnet transaction fees.</div>
           </section>
         </section>
       </section>

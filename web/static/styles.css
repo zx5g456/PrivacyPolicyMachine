@@ -54,6 +54,35 @@ body {
   font-weight: 800;
 }
 
+.wallet-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wallet-connect {
+  min-height: 38px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.wallet-status {
+  max-width: 210px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.resume-file {
+  margin-top: 18px;
+}
+
+.resume-file[hidden] {
+  display: none;
+}
+
 .eyebrow {
   margin: 0 0 4px;
   color: var(--green);
@@ -1157,6 +1186,10 @@ button {
 
   .developer-switcher {
     grid-template-columns: 1fr;
+  }
+
+  .wallet-controls {
+    flex-wrap: wrap;
   }
 
   .create-grid,

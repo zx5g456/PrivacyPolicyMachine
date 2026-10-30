@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 P1_ROOT = TOOL_ROOT / "P1"
@@ -42,6 +44,31 @@ def test_extract_risk_classification():
         )
         == "Not High-Risk"
     )
+
+
+@pytest.mark.parametrize(
+    ("analysis", "expected"),
+    [
+        ("* High-Risk Classification: [High-Risk]", "High-Risk"),
+        ("- **High-Risk Classification:** **Not High-Risk**", "Not High-Risk"),
+        ("1. `High-Risk Classification: Not High-Risk`", "Not High-Risk"),
+    ],
+)
+def test_extract_risk_classification_accepts_prompt_format_and_markdown(analysis, expected):
+    assert p1.extract_risk_classification(analysis) == expected
+
+
+@pytest.mark.parametrize(
+    "analysis",
+    [
+        "High-Risk Classification: Potentially High-Risk",
+        "High-Risk Classification: High-Risk or Not High-Risk",
+        "High-Risk Classification: High-Risk\nHigh-Risk Classification: Not High-Risk",
+    ],
+)
+def test_extract_risk_classification_rejects_ambiguous_output(analysis):
+    with pytest.raises(ValueError, match="valid High-Risk Classification"):
+        p1.extract_risk_classification(analysis)
 
 
 def test_key_p1_prompts_are_preserved():

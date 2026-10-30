@@ -21,7 +21,11 @@ def _assignment_value(line: str, variable: str) -> str | None:
 
 
 def load_gpt_api_key(config_path: str | Path | None = None) -> str:
-    """Read a bare API key or OPENAI_API_KEY assignment without sourcing shell code."""
+    """Use the configured environment key, with legacy file support for standalone runs."""
+    if config_path is None:
+        environment_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if environment_key:
+            return environment_key
     path = Path(
         config_path
         or os.environ.get("GPT_CONFIG_PATH", "")

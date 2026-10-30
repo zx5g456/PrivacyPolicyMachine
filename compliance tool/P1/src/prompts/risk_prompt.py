@@ -33,9 +33,12 @@ High-Risk Determination Logic:
     * Otherwise → Mark as Not High-Risk.
 
 Output Format:
-* High-Risk Classification: [High-Risk / Not High-Risk]
-* Reasoning: Summarise which purpose(s) and/or data types triggered the classification.
-* Evidence: Direct quotes from the privacy policy that support the classification.
+High-Risk Classification: <High-Risk or Not High-Risk>
+Reasoning: Summarise which purpose(s) and/or data types triggered the classification.
+Evidence: Direct quotes from the privacy policy that support the classification.
+
+Write exactly one classification line, using one of the two values above. Do not add
+Markdown bullets, bold markers, brackets, or extra words to that line.
 
 File being analyzed: {filename}
 

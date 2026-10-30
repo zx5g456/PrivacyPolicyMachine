@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +11,7 @@ from web3 import Web3
 
 
 DEFAULT_ONCHAIN_CHUNK_BYTES = 8 * 1024
+LOG_BLOCK_BATCH = 1000
 
 
 def split_bytes(value: bytes, chunk_size: int) -> list[bytes]:
@@ -89,6 +89,7 @@ class ChainTransaction:
 class ChainRecord:
     recordKey: str
     blockNumber: int
+    transactionIndex: int
     txHash: str
     timestamp: int
     gasUsed: int
@@ -176,9 +177,16 @@ class TrustedPolicyRegistry:
     """Web3 client for chunked, contract-storage-backed policy records."""
 
     def __init__(self, artifact_path: Path):
-        self.rpc_url = os.environ.get("RPC_URL", "http://127.0.0.1:8545")
+        self.rpc_url = os.environ.get("RPC_URL", "")
         self.contract_address = os.environ.get("CONTRACT_ADDRESS", "")
         self.from_block = int(os.environ.get("CONTRACT_DEPLOYMENT_BLOCK", "0"))
+        self.expected_chain_id = int(os.environ.get("EXPECTED_CHAIN_ID", "8453"))
+        if not self.rpc_url or not self.rpc_url.startswith("https://"):
+            raise RuntimeError("RPC_URL must be an HTTPS Base Mainnet endpoint")
+        if self.from_block <= 0:
+            raise RuntimeError("CONTRACT_DEPLOYMENT_BLOCK must be the Base Mainnet deployment block")
+        if self.expected_chain_id != 8453:
+            raise RuntimeError("Only Base Mainnet chain ID 8453 is supported")
         configured_chunk_size = int(
             os.environ.get("ONCHAIN_CHUNK_BYTES", str(DEFAULT_ONCHAIN_CHUNK_BYTES))
         )
@@ -186,7 +194,7 @@ class TrustedPolicyRegistry:
             raise RuntimeError("ONCHAIN_CHUNK_BYTES must be a positive integer")
         self.configured_chunk_size = configured_chunk_size
         self.web3 = Web3(Web3.HTTPProvider(self.rpc_url))
-        self._transaction_lock = threading.Lock()
+        self._connection_verified = False
         if not artifact_path.exists():
             raise RuntimeError("Contract artifact not found. Run `npm run contract:compile` before starting the server.")
         if not self.contract_address:
@@ -200,77 +208,79 @@ class TrustedPolicyRegistry:
             address=Web3.to_checksum_address(self.contract_address), abi=self.abi
         )
 
-    def register_trusted_policy_record(self, data: OnChainData) -> ChainRecord:
-        """Upload exact bytes in resumable transactions and finalize one visible record."""
+    def get_publisher_owner(self, publisher: str) -> str:
         self._require_connection()
-        if not data.rawFile:
-            raise ValueError("rawFile is required")
-        if not data.metadataJson:
-            raise ValueError("metadataJson is required")
+        return self.contract.functions.getPublisherOwner(publisher).call()
 
-        sender = self._sender_account()
+    def prepare_policy_transactions(self, data: OnChainData, sender: str) -> dict[str, Any]:
+        """Build wallet-payable calls; no key or transaction is held by this service."""
+        self._require_connection()
+        sender = Web3.to_checksum_address(sender)
+        if not data.rawFile or not data.metadataJson:
+            raise ValueError("Policy file and metadata are required")
+        owner = self.get_publisher_owner(data.publisherEntity)
+        if owner.lower() != sender.lower():
+            raise ValueError("Connected wallet is not authorized for this developer")
+        document_limit = int(self.contract.functions.MAX_DOCUMENT_BYTES().call())
+        metadata_limit = int(self.contract.functions.MAX_METADATA_BYTES().call())
+        if len(data.rawFile) > document_limit:
+            raise ValueError(f"Policy file exceeds {document_limit} bytes")
+        if len(data.metadataJson) > metadata_limit:
+            raise ValueError(f"Policy metadata exceeds {metadata_limit} bytes")
+
         record_key = self.contract.functions.getRecordKey(
             data.publisherEntity, data.serviceName, data.policyVersion
         ).call()
-        transactions: list[ChainTransaction] = []
+        key_hex = Web3.to_hex(record_key)
+        if self.contract.functions.hasRecord(record_key).call():
+            record = self.read_record_by_key(record_key)
+            content = self.read_on_chain_content(record_key)
+            self._require_finalized_request_matches(record, content, data)
+            return {"recordKey": key_hex, "chainId": self.expected_chain_id,
+                    "contractAddress": self.contract.address, "transactions": []}
 
-        with self._transaction_lock:
-            finalized = self._try_read_record_by_key(record_key)
-            if finalized is not None:
-                content = self.read_on_chain_content(finalized.recordKey)
-                self._require_finalized_request_matches(finalized, content, data)
-                return finalized
-            if self.contract.functions.hasPendingUpload(record_key).call():
-                progress = self._read_upload_progress(record_key)
-                self._validate_resumable_upload(record_key, progress, data, sender)
-            else:
-                begin = self.contract.functions.beginPolicyRegistration(
-                    self._manifest_tuple(data)
-                )
-                receipt = self._transact(begin, sender)
-                transactions.append(self._transaction(receipt, "begin"))
-                progress = self._read_upload_progress(record_key)
-
+        transactions: list[dict[str, str]] = []
+        pending_active = self.contract.functions.hasPendingUpload(record_key).call()
+        if pending_active:
+            progress = self._read_upload_progress(record_key)
+            self._validate_resumable_upload(record_key, progress, data, sender)
             document_chunks = self._read_chunks(record_key, "document", progress.documentChunkCount)
             metadata_chunks = self._read_chunks(record_key, "metadata", progress.metadataChunkCount)
             self._validate_pending_chunks(progress, document_chunks, metadata_chunks)
             document_offset = self._validated_prefix(data.rawFile, document_chunks, "document")
             metadata_offset = self._validated_prefix(data.metadataJson, metadata_chunks, "metadata")
+            document_index = progress.documentChunkCount
+            metadata_index = progress.metadataChunkCount
+        else:
+            transactions.append(self._prepared_transaction(
+                "begin", "beginPolicyRegistration", [self._manifest_tuple(data)]
+            ))
+            document_offset = metadata_offset = document_index = metadata_index = 0
 
-            transactions.extend(
-                self._append_content(
-                    record_key,
-                    "document",
-                    data.rawFile,
-                    document_offset,
-                    progress.documentChunkCount,
-                    sender,
-                )
-            )
-            transactions.extend(
-                self._append_content(
-                    record_key,
-                    "metadata",
-                    data.metadataJson,
-                    metadata_offset,
-                    progress.metadataChunkCount,
-                    sender,
-                )
-            )
+        chunk_size = min(self.configured_chunk_size, int(self.contract.functions.MAX_CHUNK_BYTES().call()))
+        for chunk in split_bytes(data.rawFile[document_offset:], chunk_size):
+            transactions.append(self._prepared_transaction(
+                "document chunk", "appendDocumentChunk", [record_key, document_index, chunk]
+            ))
+            document_index += 1
+        for chunk in split_bytes(data.metadataJson[metadata_offset:], chunk_size):
+            transactions.append(self._prepared_transaction(
+                "metadata chunk", "appendMetadataChunk", [record_key, metadata_index, chunk]
+            ))
+            metadata_index += 1
+        transactions.append(self._prepared_transaction(
+            "finalize", "finalizePolicyRegistration", [record_key]
+        ))
+        return {"recordKey": key_hex, "chainId": self.expected_chain_id,
+                "contractAddress": self.contract.address, "transactions": transactions}
 
-            final_receipt = self._transact(
-                self.contract.functions.finalizePolicyRegistration(record_key), sender
-            )
-            transactions.append(self._transaction(final_receipt, "finalize"))
-
-        events = self.contract.events.TrustedPolicyRecordRegistered().process_receipt(final_receipt)
-        if not events:
-            raise RuntimeError("Registration finalized but its contract event was not found")
-        complete_transactions = self._registration_transactions(record_key)
-        record = self._record_from_event(events[0], final_receipt, complete_transactions)
-        content = self.read_on_chain_content(record.recordKey)
-        self._require_content_matches_record(content, record.data)
-        return record
+    def _prepared_transaction(self, phase: str, function: str, args: list[Any]) -> dict[str, str]:
+        return {
+            "phase": phase,
+            "to": self.contract.address,
+            "data": self.contract.encode_abi(function, args=args),
+            "value": "0x0",
+        }
 
     def read_on_chain_record(
         self, publisher: str, service: str, version: str | None = None
@@ -374,9 +384,7 @@ class TrustedPolicyRegistry:
 
     def list_records(self) -> list[ChainRecord]:
         self._require_connection()
-        logs = self.contract.events.TrustedPolicyRecordRegistered().get_logs(
-            from_block=self.from_block, to_block="latest"
-        )
+        logs = self._event_logs(self.contract.events.TrustedPolicyRecordRegistered())
         return [
             self._record_from_event(
                 log, self.web3.eth.get_transaction_receipt(log["transactionHash"])
@@ -445,82 +453,6 @@ class TrustedPolicyRegistry:
             "serviceName": record.data.serviceName,
             "policyVersion": record.data.policyVersion,
         }
-
-    def _append_content(
-        self,
-        record_key: bytes,
-        content_type: str,
-        complete_content: bytes,
-        offset: int,
-        chunk_index: int,
-        sender: str,
-    ) -> list[ChainTransaction]:
-        transactions: list[ChainTransaction] = []
-        while offset < len(complete_content):
-            remaining = complete_content[offset:]
-            chunk, function = self._build_storable_chunk(
-                record_key, content_type, chunk_index, remaining, sender
-            )
-            receipt = self._transact(function, sender)
-            transactions.append(
-                self._transaction(
-                    receipt,
-                    "chunk",
-                    content_type=content_type,
-                    chunk_index=chunk_index,
-                    chunk_bytes=len(chunk),
-                )
-            )
-            offset += len(chunk)
-            chunk_index += 1
-        return transactions
-
-    def _build_storable_chunk(
-        self,
-        record_key: bytes,
-        content_type: str,
-        chunk_index: int,
-        remaining: bytes,
-        sender: str,
-    ) -> tuple[bytes, Any]:
-        contract_limit = int(self.contract.functions.MAX_CHUNK_BYTES().call())
-        size = min(self.configured_chunk_size, contract_limit, len(remaining))
-        last_error: Exception | None = None
-        while size > 0:
-            chunk = remaining[:size]
-            function = self._append_function(record_key, content_type, chunk_index, chunk)
-            try:
-                estimated = int(function.estimate_gas({"from": sender}))
-                block_gas_limit = int(self.web3.eth.get_block("latest")["gasLimit"])
-                if estimated >= int(block_gas_limit * 0.8):
-                    raise RuntimeError(
-                        f"estimated chunk gas {estimated} is too close to block gas limit {block_gas_limit}"
-                    )
-                return chunk, function
-            except Exception as exc:
-                last_error = exc
-                if size == 1:
-                    break
-                size = max(1, size // 2)
-        raise RuntimeError(
-            f"Unable to store {content_type} chunk {chunk_index}, even after reducing its size"
-        ) from last_error
-
-    def _append_function(
-        self, record_key: bytes, content_type: str, chunk_index: int, chunk: bytes
-    ) -> Any:
-        if content_type == "document":
-            return self.contract.functions.appendDocumentChunk(record_key, chunk_index, chunk)
-        if content_type == "metadata":
-            return self.contract.functions.appendMetadataChunk(record_key, chunk_index, chunk)
-        raise ValueError(f"Unsupported content type: {content_type}")
-
-    def _transact(self, function: Any, sender: str) -> Any:
-        tx_hash = function.transact({"from": sender})
-        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        if receipt.status != 1:
-            raise RuntimeError(f"On-chain policy transaction reverted: {tx_hash.hex()}")
-        return receipt
 
     def _transaction(
         self,
@@ -657,7 +589,7 @@ class TrustedPolicyRegistry:
     def _require_finalized_request_matches(
         self, record: ChainRecord, content: OnChainContent, data: OnChainData
     ) -> None:
-        """Make retries idempotent when finalization succeeded before SQL persistence."""
+        """Make retries idempotent when finalization succeeded before UI completion."""
         self._require_content_matches_record(content, record.data)
         comparisons = {
             "document content": content.rawFile == data.rawFile,
@@ -685,39 +617,58 @@ class TrustedPolicyRegistry:
             data.effectiveDate,
         )
 
-    def _sender_account(self) -> str:
-        configured = os.environ.get("BLOCKCHAIN_ACCOUNT")
-        if configured:
-            return Web3.to_checksum_address(configured)
-        accounts = self.web3.eth.accounts
-        if not accounts:
-            raise RuntimeError("RPC node exposes no unlocked account. Set BLOCKCHAIN_ACCOUNT.")
-        return accounts[0]
-
     def _require_connection(self) -> None:
+        if self._connection_verified:
+            return
         if not self.web3.is_connected():
             raise RuntimeError(f"Cannot connect to Ethereum RPC at {self.rpc_url}")
-        if not self.web3.eth.get_code(self.contract.address):
+        actual_chain_id = int(self.web3.eth.chain_id)
+        if actual_chain_id != self.expected_chain_id:
+            raise RuntimeError(
+                f"Expected Base Mainnet chain {self.expected_chain_id}, connected to {actual_chain_id}"
+            )
+        code = self.web3.eth.get_code(self.contract.address)
+        if not code:
             raise RuntimeError(f"No contract is deployed at {self.contract.address} on {self.rpc_url}")
+        expected_hash = os.environ.get("CONTRACT_RUNTIME_CODE_HASH", "").strip()
+        if expected_hash and Web3.to_hex(Web3.keccak(code)).lower() != expected_hash.lower():
+            raise RuntimeError("Contract runtime code hash does not match the deployment record")
+        self._connection_verified = True
 
     def _find_registration_event_by_key(self, record_key: bytes) -> Any:
-        logs = self.contract.events.TrustedPolicyRecordRegistered().get_logs(
-            from_block=self.from_block,
-            to_block="latest",
-            argument_filters={"recordKey": record_key},
-        )
-        if logs:
-            return logs[-1]
+        event = self.contract.events.TrustedPolicyRecordRegistered()
+        end = int(self.web3.eth.block_number)
+        while end >= self.from_block:
+            start = max(self.from_block, end - LOG_BLOCK_BATCH + 1)
+            logs = event.get_logs(
+                from_block=start,
+                to_block=end,
+                argument_filters={"recordKey": record_key},
+            )
+            if logs:
+                return logs[-1]
+            end = start - 1
         raise RuntimeError("On-chain record exists but its finalization event was not found")
+
+    def _event_logs(self, event: Any, record_key: bytes | None = None) -> list[Any]:
+        head = int(self.web3.eth.block_number)
+        logs: list[Any] = []
+        for start in range(self.from_block, head + 1, LOG_BLOCK_BATCH):
+            kwargs: dict[str, Any] = {
+                "from_block": start,
+                "to_block": min(start + LOG_BLOCK_BATCH - 1, head),
+            }
+            if record_key is not None:
+                kwargs["argument_filters"] = {"recordKey": record_key}
+            logs.extend(event.get_logs(**kwargs))
+        return logs
 
     def _registration_transactions(
         self, record_key: bytes
     ) -> tuple[ChainTransaction, ...]:
         entries: list[tuple[int, int, ChainTransaction]] = []
-        started_logs = self.contract.events.PolicyUploadStarted().get_logs(
-            from_block=self.from_block,
-            to_block="latest",
-            argument_filters={"recordKey": record_key},
+        started_logs = self._event_logs(
+            self.contract.events.PolicyUploadStarted(), record_key
         )
         for event in started_logs:
             receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
@@ -728,10 +679,8 @@ class TrustedPolicyRegistry:
                     self._transaction(receipt, "begin"),
                 )
             )
-        chunk_logs = self.contract.events.PolicyChunkStored().get_logs(
-            from_block=self.from_block,
-            to_block="latest",
-            argument_filters={"recordKey": record_key},
+        chunk_logs = self._event_logs(
+            self.contract.events.PolicyChunkStored(), record_key
         )
         for event in chunk_logs:
             receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
@@ -749,10 +698,8 @@ class TrustedPolicyRegistry:
                     ),
                 )
             )
-        finalized_logs = self.contract.events.TrustedPolicyRecordRegistered().get_logs(
-            from_block=self.from_block,
-            to_block="latest",
-            argument_filters={"recordKey": record_key},
+        finalized_logs = self._event_logs(
+            self.contract.events.TrustedPolicyRecordRegistered(), record_key
         )
         for event in finalized_logs:
             receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
@@ -827,6 +774,8 @@ class TrustedPolicyRegistry:
     ) -> ChainRecord:
         args = event["args"]
         block = self.web3.eth.get_block(event["blockNumber"])
+        if Web3.to_hex(event["blockHash"]) != Web3.to_hex(block["hash"]):
+            raise RuntimeError("Base chain reorganized while reading the record; retry the request")
         previous_version = ""
         if record[15]:
             previous = self.contract.functions.readRecordByKey(record[14]).call()
@@ -853,6 +802,7 @@ class TrustedPolicyRegistry:
         return ChainRecord(
             recordKey=Web3.to_hex(args["recordKey"]),
             blockNumber=int(event["blockNumber"]),
+            transactionIndex=int(receipt["transactionIndex"]),
             txHash=Web3.to_hex(event["transactionHash"]),
             timestamp=int(block["timestamp"]),
             gasUsed=int(receipt["gasUsed"]),

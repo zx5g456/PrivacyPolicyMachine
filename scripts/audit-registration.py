@@ -18,11 +18,14 @@ def main() -> None:
     )
     parser.add_argument("--rpc-url", required=True)
     parser.add_argument("--contract-address", required=True)
+    parser.add_argument("--deployment-block", required=True, type=int)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 
     os.environ["RPC_URL"] = args.rpc_url
     os.environ["CONTRACT_ADDRESS"] = args.contract_address
+    os.environ["CONTRACT_DEPLOYMENT_BLOCK"] = str(args.deployment_block)
+    os.environ["EXPECTED_CHAIN_ID"] = "8453"
 
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))

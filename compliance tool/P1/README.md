@@ -14,8 +14,10 @@ export OPENAI_API_KEY="your_api_key"
 ```
 
 When P1 is launched by `../run_compliance.py`, the shared configuration loader
-reads the key from `../../data/gpt.zshrc` (or `GPT_CONFIG_PATH`) and passes it to
-P1, P2, and P3 through `OPENAI_API_KEY`.
+uses `OPENAI_API_KEY` from the environment and passes it to P1, P2, and P3.
+The Base Mainnet launcher loads that variable from `config/base-mainnet.env`.
+Standalone legacy runs can still fall back to `../../data/gpt.zshrc` (or
+`GPT_CONFIG_PATH`) when the environment variable is absent.
 
 The default model is `gpt-4o-mini`, matching P2 and P3. Override it with
 `--model` or, for the complete listener pipeline, `COMPLIANCE_GPT_MODEL`.
