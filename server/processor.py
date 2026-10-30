@@ -43,10 +43,6 @@ RISK_FLAG_DETAILS = {
 }
 
 
-def hash_policy(raw_file: str) -> str:
-    return hashlib.sha256(raw_file.encode("utf-8")).hexdigest()
-
-
 def hash_policy_bytes(raw_file: bytes) -> str:
     return hashlib.sha256(raw_file).hexdigest()
 

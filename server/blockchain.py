@@ -75,17 +75,6 @@ class StoredChainData:
 
 
 @dataclass(frozen=True)
-class ChainTransaction:
-    phase: str
-    txHash: str
-    blockNumber: int
-    gasUsed: int
-    contentType: str = ""
-    chunkIndex: int | None = None
-    chunkBytes: int = 0
-
-
-@dataclass(frozen=True)
 class ChainRecord:
     recordKey: str
     blockNumber: int
@@ -98,7 +87,6 @@ class ChainRecord:
     data: StoredChainData
     previousBlockHash: str
     blockHash: str
-    transactions: tuple[ChainTransaction, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -282,25 +270,6 @@ class TrustedPolicyRegistry:
             "value": "0x0",
         }
 
-    def read_on_chain_record(
-        self, publisher: str, service: str, version: str | None = None
-    ) -> ChainRecord | None:
-        self._require_connection()
-        if version is None:
-            matches = [
-                record
-                for record in self.list_records()
-                if record.data.publisherEntity == publisher and record.data.serviceName == service
-            ]
-            return matches[-1] if matches else None
-        record_key = self.contract.functions.getRecordKey(publisher, service, version).call()
-        if not self.contract.functions.hasRecord(record_key).call():
-            return None
-        record = self.contract.functions.readRecordByKey(record_key).call()
-        event = self._find_registration_event_by_key(record_key)
-        receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
-        return self._record_from_contract(record, event, receipt)
-
     def read_record_by_key(self, record_key: str | bytes) -> ChainRecord:
         self._require_connection()
         key = self._record_key_bytes(record_key)
@@ -382,16 +351,6 @@ class TrustedPolicyRegistry:
             )
         return content
 
-    def list_records(self) -> list[ChainRecord]:
-        self._require_connection()
-        logs = self._event_logs(self.contract.events.TrustedPolicyRecordRegistered())
-        return [
-            self._record_from_event(
-                log, self.web3.eth.get_transaction_receipt(log["transactionHash"])
-            )
-            for log in logs
-        ]
-
     def audit_registration(self, identifier: str) -> dict[str, Any]:
         """Audit finalized content from contract storage, using a record key or final tx hash."""
         self._require_connection()
@@ -453,24 +412,6 @@ class TrustedPolicyRegistry:
             "serviceName": record.data.serviceName,
             "policyVersion": record.data.policyVersion,
         }
-
-    def _transaction(
-        self,
-        receipt: Any,
-        phase: str,
-        content_type: str = "",
-        chunk_index: int | None = None,
-        chunk_bytes: int = 0,
-    ) -> ChainTransaction:
-        return ChainTransaction(
-            phase=phase,
-            txHash=Web3.to_hex(receipt["transactionHash"]),
-            blockNumber=int(receipt["blockNumber"]),
-            gasUsed=int(receipt["gasUsed"]),
-            contentType=content_type,
-            chunkIndex=chunk_index,
-            chunkBytes=chunk_bytes,
-        )
 
     def _read_upload_progress(self, record_key: bytes) -> UploadProgress:
         pending = self.contract.functions.readUploadProgress(record_key).call()
@@ -650,78 +591,6 @@ class TrustedPolicyRegistry:
             end = start - 1
         raise RuntimeError("On-chain record exists but its finalization event was not found")
 
-    def _event_logs(self, event: Any, record_key: bytes | None = None) -> list[Any]:
-        head = int(self.web3.eth.block_number)
-        logs: list[Any] = []
-        for start in range(self.from_block, head + 1, LOG_BLOCK_BATCH):
-            kwargs: dict[str, Any] = {
-                "from_block": start,
-                "to_block": min(start + LOG_BLOCK_BATCH - 1, head),
-            }
-            if record_key is not None:
-                kwargs["argument_filters"] = {"recordKey": record_key}
-            logs.extend(event.get_logs(**kwargs))
-        return logs
-
-    def _registration_transactions(
-        self, record_key: bytes
-    ) -> tuple[ChainTransaction, ...]:
-        entries: list[tuple[int, int, ChainTransaction]] = []
-        started_logs = self._event_logs(
-            self.contract.events.PolicyUploadStarted(), record_key
-        )
-        for event in started_logs:
-            receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
-            entries.append(
-                (
-                    int(event["blockNumber"]),
-                    int(event["logIndex"]),
-                    self._transaction(receipt, "begin"),
-                )
-            )
-        chunk_logs = self._event_logs(
-            self.contract.events.PolicyChunkStored(), record_key
-        )
-        for event in chunk_logs:
-            receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
-            content_type = "document" if int(event["args"]["contentType"]) == 0 else "metadata"
-            entries.append(
-                (
-                    int(event["blockNumber"]),
-                    int(event["logIndex"]),
-                    self._transaction(
-                        receipt,
-                        "chunk",
-                        content_type=content_type,
-                        chunk_index=int(event["args"]["chunkIndex"]),
-                        chunk_bytes=int(event["args"]["chunkSize"]),
-                    ),
-                )
-            )
-        finalized_logs = self._event_logs(
-            self.contract.events.TrustedPolicyRecordRegistered(), record_key
-        )
-        for event in finalized_logs:
-            receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
-            entries.append(
-                (
-                    int(event["blockNumber"]),
-                    int(event["logIndex"]),
-                    self._transaction(receipt, "finalize"),
-                )
-            )
-        return tuple(item[2] for item in sorted(entries, key=lambda item: item[:2]))
-
-    def _try_read_record_by_key(self, record_key: bytes) -> ChainRecord | None:
-        if not self.contract.functions.hasRecord(record_key).call():
-            return None
-        record = self.contract.functions.readRecordByKey(record_key).call()
-        event = self._find_registration_event_by_key(record_key)
-        receipt = self.web3.eth.get_transaction_receipt(event["transactionHash"])
-        return self._record_from_contract(
-            record, event, receipt, self._registration_transactions(record_key)
-        )
-
     def _record_from_identifier(self, identifier: str) -> ChainRecord:
         try:
             receipt = self.web3.eth.get_transaction_receipt(identifier)
@@ -760,17 +629,15 @@ class TrustedPolicyRegistry:
         self,
         event: Any,
         receipt: Any,
-        transactions: tuple[ChainTransaction, ...] = (),
     ) -> ChainRecord:
         record = self.contract.functions.readRecordByKey(event["args"]["recordKey"]).call()
-        return self._record_from_contract(record, event, receipt, transactions)
+        return self._record_from_contract(record, event, receipt)
 
     def _record_from_contract(
         self,
         record: Any,
         event: Any,
         receipt: Any,
-        transactions: tuple[ChainTransaction, ...] = (),
     ) -> ChainRecord:
         args = event["args"]
         block = self.web3.eth.get_block(event["blockNumber"])
@@ -811,5 +678,4 @@ class TrustedPolicyRegistry:
             data=data,
             previousBlockHash=Web3.to_hex(block["parentHash"]),
             blockHash=Web3.to_hex(block["hash"]),
-            transactions=transactions,
         )

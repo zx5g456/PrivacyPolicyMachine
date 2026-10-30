@@ -33,7 +33,10 @@ A local web application backed by a registry on Base Mainnet (chain ID `8453`). 
 - `compliance tool/P1/high_risk_detection.py`: classifies the policy with the GPT API and selects the P3 checklist.
 - `compliance tool/P2/information_extract.py`: extracts policy information with the GPT API.
 - `compliance tool/P3/evaluate_checklist.py`: evaluates the extracted information against the compliance checklist.
-- `data/policies.db`: retained legacy SQLite file; the Base Mainnet application does not read or migrate it.
+
+`compliance tool/` is intentionally Git-ignored and kept only on this machine.
+A new checkout needs a separate local copy of that directory for automatic
+P1/P2/P3 analysis and on-chain compliance report uploads.
 
 ## Run locally with Base Mainnet
 
@@ -48,7 +51,7 @@ npm run contract:compile
 ollama pull qwen3.5:9b
 ```
 
-Copy `config/base-mainnet.env.example` to `config/base-mainnet.env` if the filled file does not already exist. This is the **one local file to fill in** for chain access and account settings. It is excluded from Git. The current workspace includes an unfilled copy. Use a Base Mainnet HTTPS RPC that supports `eth_getLogs` with enough request capacity for chunk reads and event polling. The public `https://mainnet.base.org` endpoint can return HTTP 429 even for small event queries; use a provider endpoint for reliable operation. `EXPECTED_CHAIN_ID` must remain `8453`.
+Copy `config/base-mainnet.env.example` to `config/base-mainnet.env` if the filled file does not already exist. This is the **one local file to fill in** for chain access and account settings. It is excluded from Git. Use a Base Mainnet HTTPS RPC that supports `eth_getLogs` with enough request capacity for chunk reads and event polling. The public `https://mainnet.base.org` endpoint can return HTTP 429 even for small event queries; use a provider endpoint for reliable operation. `EXPECTED_CHAIN_ID` must remain `8453`.
 
 | Setting | What to put in it |
 | --- | --- |
@@ -64,13 +67,16 @@ Fund the deployment/admin wallet for contract setup, each developer wallet for i
 
 ### Deploy once, explicitly
 
-After filling the RPC, developer addresses, deployment key, and compliance key:
+For a new deployment, fill the RPC, developer addresses, deployment key, and compliance key, then run:
 
 ```bash
 npm run base:status
 npm run contract:compile
 npm run base:deploy
 ```
+
+If `CONTRACT_ADDRESS` is already set, the contract is already configured. Run
+`npm run base:status` to check it and skip `npm run base:deploy`.
 
 `base:status` reads chain state and balances without sending transactions. `base:deploy` is the only deployment command and requires chain ID `8453`; `npm run dev` never deploys or authorizes. Deployment creates the registry with the deployer as initial owner, registers each `PUBLISHER_WALLETS_JSON` address, authorizes the compliance wallet, and optionally proposes ownership transfer to `BASE_OWNER_ADDRESS`. The target owner must call `acceptOwnership()` separately. The command records signed transactions before broadcast in Git-ignored `data/base-mainnet/pending-transactions.json`, allowing an interrupted run to resume without producing another contract. Verified transaction hashes and code hashes are saved in `data/base-mainnet/deployment.json`.
 
@@ -107,8 +113,8 @@ The server prints its local URL, normally `http://127.0.0.1:8000`. If that port 
 ### `POST /api/analyze`
 
 Analyze policy text with the local Ollama model and return a review draft. This
-preview endpoint does not write to the blockchain. Its response uses
-`uploadMethod=ai` and `requiresReview=true`.
+preview endpoint does not write to the blockchain. Its response includes
+`requiresReview=true`.
 
 Required multipart fields:
 
@@ -230,13 +236,7 @@ curl http://127.0.0.1:8000/api/analyze \
 - The developer switcher selects a publisher label. The browser wallet must match the address authorized on-chain for that label.
 - If incoming policy content already exists, the API returns `409 Conflict` and does not create a new chain record.
 - `sources/dataset/` is ignored by Git so the local dataset is not uploaded.
-
-### Historical local records
-
-The existing `data/policies.db` file is preserved as a legacy archive and is
-ignored by Git. Runtime code no longer reads or writes it. Records that existed
-only on the old local Hardhat chain are **not** registered on Base Mainnet.
-Starting or stopping the local web server does not change Base Mainnet history.
+- `data/policies.db` is preserved as an archive. The application does not read it or import its records to Base Mainnet.
 
 ## Chunked L2 Storage
 
@@ -358,12 +358,12 @@ An auditor needs the chain RPC URL, contract address, a finalized `recordKey` or
 finalization transaction hash, and the matching contract ABI. The audit reads all
 chunks from contract storage and verifies the receipt, destination contract,
 finalization call, sender, event, sizes, counts, both hashes, and both ordered
-commitments without trusting SQLite:
+commitments directly from Base Mainnet:
 
 ```bash
 .venv/bin/python scripts/audit-registration.py \
   0xRecordKeyOrFinalizationTransactionHash \
-  --rpc-url https://mainnet.base.org \
+  --rpc-url https://your-provider.example/base-mainnet \
   --contract-address 0xContractAddress \
   --deployment-block 12345678 \
   --output-dir recovered-audit

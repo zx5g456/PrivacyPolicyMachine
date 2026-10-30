@@ -1096,7 +1096,6 @@ async function loadRecords(applicationName = "") {
         <span class="version-label">Latest version</span>
         <p>Policy ID: ${escapeHtml(policy.policyId)}</p>
         <p>Developer: ${escapeHtml(policy.developerName || "unknown")}</p>
-        <p>Upload method: ${escapeHtml(uploadMethodLabel(policy.uploadMethod))}</p>
         <p>Uploaded: ${escapeHtml(version)}</p>
         <p>Hash: ${escapeHtml(shorten(policy.hashCode))}</p>
         <p>Tx: ${escapeHtml(shorten(policy.txHash))}</p>
@@ -1187,7 +1186,6 @@ function syncSelectedPolicy() {
     `Application Name: ${name}`,
     `Policy ID: ${selected.policyId}`,
     `Developer: ${selected.developerName || "unknown"}`,
-    `Upload method: ${uploadMethodLabel(selected.uploadMethod)}`,
     `Latest Upload: ${selected.policyVersion || "no upload time"}`,
     `Current Hash: ${shorten(selected.hashCode)}`,
   ].join("\n");
@@ -1247,7 +1245,6 @@ function renderProcessingResult(result) {
     `Policy ID: ${result.policy.policyId}`,
     `Application Name: ${result.policy.policyName}`,
     `Developer: ${result.policy.developerName}`,
-    `Upload method: ${uploadMethodLabel(result.policy.uploadMethod)}`,
     `Uploaded: ${result.policy.policyVersion}`,
     `On-chain chunks: ${onChainData ? Number(onChainData.documentChunkCount || 0) + Number(onChainData.metadataChunkCount || 0) : 0}`,
     result.onChain?.txHash ? `Finalization transaction: ${result.onChain.txHash}` : "",
@@ -1355,10 +1352,6 @@ function shorten(value) {
   return value.length > 22 ? `${value.slice(0, 12)}...${value.slice(-8)}` : value;
 }
 
-function uploadMethodLabel(method) {
-  return method === "ai" ? "AI Upload" : "Legacy Upload";
-}
-
 function findOnChainRecord(policy) {
   const record = chainRecordsByKey.get((policy.recordKey || "").toLowerCase());
   if (!record) return null;
@@ -1458,7 +1451,7 @@ function renderPolicyDetailHtml(policy, onChain, data, versions = [policy]) {
       <div class="policy-detail-header">
         <div>
           <h3>${escapeHtml(displayPolicyName(policy))}</h3>
-          <p>${escapeHtml(policy.developerName || "unknown")} · ${escapeHtml(policy.policyVersion || "no upload time")} · ${escapeHtml(uploadMethodLabel(policy.uploadMethod))}</p>
+          <p>${escapeHtml(policy.developerName || "unknown")} · ${escapeHtml(policy.policyVersion || "no upload time")}</p>
         </div>
         <div class="record-key">${escapeHtml(shorten(policy.recordKey || (onChain && onChain.recordKey) || "")) || "no record key"}</div>
       </div>

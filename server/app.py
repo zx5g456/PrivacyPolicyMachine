@@ -203,7 +203,6 @@ class AppHandler(BaseHTTPRequestHandler):
         metadata["effectiveDate"] = effective_date
         metadata["documentHash"] = hash_code
         metadata["changeSummary"] = change_summary
-        metadata["uploadMethod"] = "ai"
         metadata.setdefault("permittedUsage", [])
         metadata.setdefault("metadataDetails", {})
         metadata_bytes = canonical_metadata_bytes(metadata)
@@ -349,7 +348,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 "effectiveDate": self._optional_payload(payload, "effectiveDate"),
                 "documentHash": hash_code,
                 "changeSummary": "",
-                "uploadMethod": "ai",
             }
         )
         return raw_file, metadata, hash_code
@@ -484,7 +482,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 "analysis": analysis.model_dump(),
                 "metadata": metadata,
                 "report": generate_report(metadata, hash_code),
-                "uploadMethod": "ai",
                 "requiresReview": True,
                 "persisted": False,
                 "onChain": False,
@@ -594,9 +591,6 @@ class AppHandler(BaseHTTPRequestHandler):
             text = raw_text.strip()
             return text.encode("utf-8"), text
         raise ValueError("Upload a policy file or enter policy text to verify")
-
-    def _submitted_policy(self, payload: dict[str, Any]) -> str:
-        return self._submitted_policy_data(payload)[1]
 
     def _application_name(self, payload: dict[str, Any]) -> str:
         application_name = payload.get("applicationName") or payload.get("policyName")

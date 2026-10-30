@@ -1,6 +1,5 @@
 import importlib.util
 import os
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,25 +12,14 @@ SPEC.loader.exec_module(gpt_api)
 
 
 class GptApiConfigurationTests(unittest.TestCase):
-    def test_environment_key_takes_priority_over_legacy_file(self):
-        with tempfile.TemporaryDirectory() as directory:
-            legacy_file = Path(directory) / "gpt.zshrc"
-            legacy_file.write_text("OPENAI_API_KEY=legacy-test-key\n", encoding="utf-8")
-            with patch.dict(os.environ, {
-                "OPENAI_API_KEY": "mainnet-test-key",
-                "GPT_CONFIG_PATH": str(legacy_file),
-            }):
-                self.assertEqual(gpt_api.load_gpt_api_key(), "mainnet-test-key")
+    def test_reads_environment_key(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": " mainnet-test-key "}):
+            self.assertEqual(gpt_api.load_gpt_api_key(), "mainnet-test-key")
 
-    def test_legacy_file_remains_available_without_environment_key(self):
-        with tempfile.TemporaryDirectory() as directory:
-            legacy_file = Path(directory) / "gpt.zshrc"
-            legacy_file.write_text("OPENAI_API_KEY=legacy-test-key\n", encoding="utf-8")
-            with patch.dict(os.environ, {
-                "OPENAI_API_KEY": "",
-                "GPT_CONFIG_PATH": str(legacy_file),
-            }):
-                self.assertEqual(gpt_api.load_gpt_api_key(), "legacy-test-key")
+    def test_missing_environment_key_fails(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            with self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY is required"):
+                gpt_api.load_gpt_api_key()
 
 
 if __name__ == "__main__":

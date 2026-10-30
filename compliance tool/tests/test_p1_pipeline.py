@@ -27,7 +27,6 @@ def load_module(name: str, path: Path):
 p1 = load_module("p1_high_risk_detection", P1_ROOT / "high_risk_detection.py")
 pipeline = load_module("compliance_pipeline", TOOL_ROOT / "run_compliance.py")
 from src.clients import gpt_api
-from src.prompts.data_type_prompt import construct_data_type_prompt
 from src.prompts.risk_prompt import construct_risk_prompt
 
 
@@ -71,16 +70,12 @@ def test_extract_risk_classification_rejects_ambiguous_output(analysis):
         p1.extract_risk_classification(analysis)
 
 
-def test_key_p1_prompts_are_preserved():
+def test_p1_risk_prompt_is_preserved():
     risk_prompt = construct_risk_prompt("policy body", "policy.txt")
     assert "High-Risk Determination Logic" in risk_prompt
     assert "EU AI Act Annex III" in risk_prompt
     assert "Always quote directly from the privacy policy" in risk_prompt
     assert "High-Risk Classification" in risk_prompt
-
-    data_type_prompt = construct_data_type_prompt("policy body", "policy.txt")
-    assert "XR_TYPE_CHECKLIST" in data_type_prompt
-    assert "Be conservative" in data_type_prompt
 
 
 def test_p1_writes_structured_result(monkeypatch, tmp_path):

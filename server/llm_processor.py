@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Callable
 
 from pydantic import ValidationError
 
@@ -365,9 +365,3 @@ def _merge_extractions(
             ),
         )
     return PolicyChunkExtraction(**merged)
-
-
-def analyze_policy(policy_text: str, **processor_options: Any) -> dict[str, Any]:
-    """Convenience function for the HTTP layer and small scripts."""
-
-    return PolicyLLMProcessor(**processor_options).analyze(policy_text).model_dump()
